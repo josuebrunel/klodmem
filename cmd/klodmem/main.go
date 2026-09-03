@@ -26,8 +26,14 @@ func main() {
 }
 
 func run() error {
-	ingest := flag.Bool("ingest", false, "index memory files once and exit, without starting the MCP server")
+	ingestAll := flag.Bool("ingest", false, "index memory and history once and exit, without starting the MCP server")
+	ingestMemory := flag.Bool("ingest.memory", false, "index memory files only, once, and exit")
+	ingestHistory := flag.Bool("ingest.history", false, "index conversation history only, once, and exit")
 	flag.Parse()
+
+	doMemory := *ingestAll || *ingestMemory
+	doHistory := *ingestAll || *ingestHistory
+	oneShot := *ingestAll || *ingestMemory || *ingestHistory
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -50,21 +56,28 @@ func run() error {
 	defer func() { _ = s.Close() }()
 
 	idx := indexer.New(cfg.MemoryRoot, s, log)
+	histIdx := historyindexer.New(cfg.MemoryRoot, s, log)
+
+	if oneShot {
+		if doMemory {
+			if err := idx.FullScan(ctx); err != nil {
+				return err
+			}
+		}
+		if doHistory {
+			if err := histIdx.FullScan(ctx); err != nil {
+				return err
+			}
+		}
+		log.Info("klodmem: ingest complete")
+		return nil
+	}
+
 	if err := idx.FullScan(ctx); err != nil {
 		return err
 	}
-
-	var histIdx *historyindexer.Indexer
-	if cfg.IndexHistory {
-		histIdx = historyindexer.New(cfg.MemoryRoot, s, log)
-		if err := histIdx.FullScan(ctx); err != nil {
-			return err
-		}
-	}
-
-	if *ingest {
-		log.Info("klodmem: ingest complete")
-		return nil
+	if err := histIdx.FullScan(ctx); err != nil {
+		return err
 	}
 
 	go func() {
@@ -72,15 +85,13 @@ func run() error {
 			log.Error("klodmem: watch stopped", "error", err)
 		}
 	}()
-	if histIdx != nil {
-		go func() {
-			if err := histIdx.Watch(ctx); err != nil {
-				log.Error("klodmem: history watch stopped", "error", err)
-			}
-		}()
-	}
+	go func() {
+		if err := histIdx.Watch(ctx); err != nil {
+			log.Error("klodmem: history watch stopped", "error", err)
+		}
+	}()
 
-	server := mcpserver.New(s, log, cfg.IndexHistory)
+	server := mcpserver.New(s, log)
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 

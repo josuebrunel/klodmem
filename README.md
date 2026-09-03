@@ -8,7 +8,7 @@ Claude Code writes memory files to `~/.claude/projects/<project>/memory/*.md` an
 
 klodmem watches those same markdown files, indexes their frontmatter and body into a local SQLite database (FTS5 full-text search, in WAL mode), and exposes a `search_memory` tool over MCP so Claude Code can search the full content of every memory, in every project, not just the index line. The markdown files stay the source of truth — klodmem only reads them.
 
-Optionally (opt-in, see below), it can also index your raw conversation history — every session transcript, across every project — and expose a second `search_history` tool for finding past discussions that never made it into memory at all.
+It also indexes your raw conversation history — every session transcript, across every project — and exposes a second `search_history` tool for finding past discussions that never made it into memory at all.
 
 ## Install
 
@@ -38,7 +38,7 @@ claude mcp add --scope user klodmem -- klodmem
 
 (If you built locally instead of using `go install`, point at the binary instead: `claude mcp add --scope user klodmem -- /path/to/klodmem/bin/klodmem`.)
 
-Start (or restart) a Claude Code session and you're done — Claude can now call `search_memory` to search across all your projects' memory files.
+Start (or restart) a Claude Code session and you're done — Claude can now call `search_memory` and `search_history` to search across all your projects' memory files and conversation history.
 
 Verify it's connected:
 
@@ -48,7 +48,7 @@ claude mcp get klodmem
 
 ## How it works
 
-On startup klodmem scans `~/.claude/projects/*/memory/*.md` (skipping each project's `MEMORY.md` index file itself), parses the YAML frontmatter (`name`, `description`, `metadata.type`) and body of every memory, and indexes it into a SQLite FTS5 table. It then keeps watching those directories for changes for as long as the MCP session is open, so memories written mid-session are searchable immediately.
+On startup klodmem scans `~/.claude/projects/*/memory/*.md` (skipping each project's `MEMORY.md` index file itself), parses the YAML frontmatter (`name`, `description`, `metadata.type`) and body of every memory, and indexes it into a SQLite FTS5 table. It also scans every `~/.claude/projects/*/<session-id>.jsonl` conversation transcript, incrementally (only newly-appended lines on each subsequent scan). Both keep watching for changes for as long as the MCP session is open, so memories and conversation turns are searchable immediately.
 
 The index lives at `~/.claude/klodmem/klodmem.db` by default and is safe to delete — klodmem rebuilds it from the markdown files on next start.
 
@@ -61,7 +61,6 @@ All settings are optional environment variables:
 | `KLODMEM_MEMORY_ROOT`    | `~/.claude/projects`           | Root directory to scan for `*/memory/*.md` |
 | `KLODMEM_DB_PATH`        | `~/.claude/klodmem/klodmem.db` | SQLite index file location                 |
 | `KLODMEM_LOG_LEVEL`      | `info`                         | `debug`, `info`, `warn`, or `error`        |
-| `KLODMEM_INDEX_HISTORY`  | `false`                        | Set `true` to also index conversation history and enable `search_history` (see below) |
 
 Pass them via `-e` when registering, e.g.:
 
@@ -69,13 +68,15 @@ Pass them via `-e` when registering, e.g.:
 claude mcp add --scope user klodmem -e KLODMEM_LOG_LEVEL=debug -- klodmem
 ```
 
-### One-shot indexing (`-ingest`)
+### One-shot indexing
+
+Run a scan and exit, without starting the MCP server or the live file watchers — useful for warming the index right after installing, verifying indexing works, or running periodically from cron independent of any Claude Code session:
 
 ```sh
-klodmem -ingest
+klodmem -ingest            # memory and history
+klodmem -ingest.memory     # memory only
+klodmem -ingest.history    # history only
 ```
-
-Runs a single scan of `KLODMEM_MEMORY_ROOT` into the index and exits — it doesn't start the MCP server or the live file watchers. Also indexes conversation history if `KLODMEM_INDEX_HISTORY=true`. Useful for warming the index right after installing, verifying indexing works, or running it periodically from cron independent of any Claude Code session.
 
 ## The `search_memory` tool
 
@@ -88,11 +89,11 @@ Runs a single scan of `KLODMEM_MEMORY_ROOT` into the index and exits — it does
 
 Each result includes the matching project, type, name, description, a snippet of the matched text, and the file path — so Claude can read the full memory file for complete context.
 
-## Conversation history search (opt-in)
+## Conversation history search
 
-`search_memory` only covers curated memory — the things Claude decided were worth writing down. Most of a conversation isn't that: it's the actual debugging, the code you pasted, the back-and-forth that never got distilled into a memory file. Set `KLODMEM_INDEX_HISTORY=true` and klodmem will also index every session transcript (`~/.claude/projects/<project>/<session-id>.jsonl`) and expose a `search_history` tool for it, so you can find past conversations directly ("did I already debug this exact error").
+`search_memory` only covers curated memory — the things Claude decided were worth writing down. Most of a conversation isn't that: it's the actual debugging, the code you pasted, the back-and-forth that never got distilled into a memory file. klodmem also indexes every session transcript (`~/.claude/projects/<project>/<session-id>.jsonl`) and exposes a `search_history` tool for it, so you can find past conversations directly ("did I already debug this exact error").
 
-This is off by default because it's a different scope than memory search, worth knowing before turning it on:
+A few things worth knowing about how this differs from memory search:
 
 - **It indexes more, and rawer, content.** Only the authored text of user/assistant turns is extracted — never tool input/output, file contents, thinking blocks, or images — but that's still your literal typed messages and Claude's literal responses, unfiltered by the curation `search_memory` relies on.
 - **It's a separate, larger index.** Transcripts are typically much bigger than memory files; expect the SQLite index to grow accordingly, and expect a one-time cost the first time it scans your existing history (a few seconds per few hundred MB, incremental after that).

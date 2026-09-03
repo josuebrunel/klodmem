@@ -11,10 +11,9 @@ import (
 
 // Config holds klodmem's runtime settings.
 type Config struct {
-	MemoryRoot   string `env:"KLODMEM_MEMORY_ROOT"   default:"~/.claude/projects"`
-	DBPath       string `env:"KLODMEM_DB_PATH"       default:"~/.claude/klodmem/klodmem.db"`
-	LogLevel     string `env:"KLODMEM_LOG_LEVEL"     default:"info"`
-	IndexHistory bool   `env:"KLODMEM_INDEX_HISTORY" default:"false"`
+	MemoryRoot string `env:"KLODMEM_MEMORY_ROOT" default:"~/.claude/projects"`
+	DBPath     string `env:"KLODMEM_DB_PATH"     default:"~/.claude/klodmem/klodmem.db"`
+	LogLevel   string `env:"KLODMEM_LOG_LEVEL"   default:"info"`
 }
 
 // Load reads Config from the environment and expands leading "~" in path fields.

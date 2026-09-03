@@ -28,10 +28,9 @@ type HistorySearchInput struct {
 	Limit   int    `json:"limit,omitempty" jsonschema:"maximum number of results to return (default 10)"`
 }
 
-// New builds an MCP server exposing search_memory, backed by s. If
-// historyEnabled is true, it also exposes search_history over indexed
-// session transcripts.
-func New(s *store.Store, log *slog.Logger, historyEnabled bool) *mcp.Server {
+// New builds an MCP server exposing search_memory and search_history, both
+// backed by s.
+func New(s *store.Store, log *slog.Logger) *mcp.Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -45,14 +44,12 @@ func New(s *store.Store, log *slog.Logger, historyEnabled bool) *mcp.Server {
 		return handleSearchMemory(ctx, s, log, in)
 	})
 
-	if historyEnabled {
-		mcp.AddTool(server, &mcp.Tool{
-			Name:        "search_history",
-			Description: "Full-text search over past Claude Code conversation transcripts (user and assistant turns) across all projects. Complements search_memory: this searches raw conversation history, not curated memory.",
-		}, func(ctx context.Context, req *mcp.CallToolRequest, in HistorySearchInput) (*mcp.CallToolResult, any, error) {
-			return handleSearchHistory(ctx, s, log, in)
-		})
-	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "search_history",
+		Description: "Full-text search over past Claude Code conversation transcripts (user and assistant turns) across all projects. Complements search_memory: this searches raw conversation history, not curated memory.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in HistorySearchInput) (*mcp.CallToolResult, any, error) {
+		return handleSearchHistory(ctx, s, log, in)
+	})
 
 	return server
 }
