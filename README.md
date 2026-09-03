@@ -1,5 +1,7 @@
 # klodmem
 
+[![CI](https://github.com/josuebrunel/klodmem/actions/workflows/ci.yml/badge.svg)](https://github.com/josuebrunel/klodmem/actions/workflows/ci.yml)
+
 Full-text search over Claude Code's auto-memory, across every project.
 
 Claude Code writes memory files to `~/.claude/projects/<project>/memory/*.md` and only lets itself find them again through `MEMORY.md`'s one-line index entries, matched by exact keyword. Ask about "port conflicts" when the note says "docker-compose mapping" and you get nothing — and each project's memories are invisible from every other project.
@@ -16,7 +18,7 @@ go install github.com/josuebrunel/klodmem/cmd/klodmem@latest
 
 This puts a `klodmem` binary in `$(go env GOPATH)/bin` — make sure that directory is on your `PATH`.
 
-Alternatively, clone and build locally:
+Alternatively, download a prebuilt binary from the [Releases page](https://github.com/josuebrunel/klodmem/releases) (Linux, macOS, and Windows, amd64/arm64), or clone and build locally:
 
 ```sh
 git clone https://github.com/josuebrunel/klodmem.git
