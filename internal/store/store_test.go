@@ -302,3 +302,77 @@ func TestDeleteTranscript(t *testing.T) {
 		t.Fatalf("SearchHistory() after delete = %d results, want 0", len(results))
 	}
 }
+
+func TestStats(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	if err := s.UpsertFile(ctx, memoryfile.Memory{
+		Path: "/proj-a/memory/one.md", Project: "proj-a", Name: "one",
+		Type: "project", Description: "d", Content: "c", MTime: 1,
+	}); err != nil {
+		t.Fatalf("UpsertFile() error: %v", err)
+	}
+
+	projA := []transcript.Message{
+		{Project: "proj-a", SessionID: "s1", Role: "user", Text: "q1", Timestamp: "2026-08-01T00:00:00Z"},
+		{Project: "proj-a", SessionID: "s1", Role: "assistant", Text: "a1", Timestamp: "2026-08-02T00:00:00Z"},
+		{Project: "proj-a", SessionID: "s2", Role: "assistant", Text: "a2", Timestamp: "2026-08-03T00:00:00Z"},
+	}
+	projB := []transcript.Message{
+		{Project: "proj-b", SessionID: "s3", Role: "user", Text: "q2", Timestamp: "2026-08-04T00:00:00Z"},
+	}
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 100, 1, projA[:2]); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s2.jsonl", "proj-a", "s2", 100, 1, projA[2:]); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+	if err := s.InsertHistoryMessages(ctx, "/proj-b/s3.jsonl", "proj-b", "s3", 100, 1, projB); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+
+	if stats.MemoryFiles != 1 {
+		t.Fatalf("Stats().MemoryFiles = %d, want 1", stats.MemoryFiles)
+	}
+	if stats.HistoryMessages != 4 {
+		t.Fatalf("Stats().HistoryMessages = %d, want 4", stats.HistoryMessages)
+	}
+	if stats.HistorySessions != 3 {
+		t.Fatalf("Stats().HistorySessions = %d, want 3", stats.HistorySessions)
+	}
+	if stats.HistoryProjects != 2 {
+		t.Fatalf("Stats().HistoryProjects = %d, want 2", stats.HistoryProjects)
+	}
+	if stats.RoleCounts["user"] != 2 || stats.RoleCounts["assistant"] != 2 {
+		t.Fatalf("Stats().RoleCounts = %+v, want user:2 assistant:2", stats.RoleCounts)
+	}
+	if len(stats.ByProject) != 2 || stats.ByProject[0].Project != "proj-a" || stats.ByProject[0].Messages != 3 || stats.ByProject[0].Sessions != 2 {
+		t.Fatalf("Stats().ByProject[0] = %+v, want proj-a with 3 messages/2 sessions first", stats.ByProject)
+	}
+	if stats.ByProject[1].Project != "proj-b" || stats.ByProject[1].Messages != 1 {
+		t.Fatalf("Stats().ByProject[1] = %+v, want proj-b with 1 message", stats.ByProject[1])
+	}
+	if stats.EarliestTime != "2026-08-01T00:00:00Z" || stats.LatestTime != "2026-08-04T00:00:00Z" {
+		t.Fatalf("Stats() time range = (%s, %s), want (2026-08-01T00:00:00Z, 2026-08-04T00:00:00Z)", stats.EarliestTime, stats.LatestTime)
+	}
+}
+
+func TestStatsEmptyStore(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.MemoryFiles != 0 || stats.HistoryMessages != 0 || stats.HistorySessions != 0 || stats.HistoryProjects != 0 {
+		t.Fatalf("Stats() on empty store = %+v, want all zero", stats)
+	}
+	if stats.EarliestTime != "" || stats.LatestTime != "" {
+		t.Fatalf("Stats() on empty store time range = (%q, %q), want empty strings", stats.EarliestTime, stats.LatestTime)
+	}
+}

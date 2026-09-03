@@ -78,6 +78,35 @@ klodmem -ingest.memory     # memory only
 klodmem -ingest.history    # history only
 ```
 
+### Inspecting the index (`-stat`)
+
+```sh
+klodmem -stat
+```
+
+Prints a summary of what's currently indexed and exits — no scanning, just a report on the index as it stands right now:
+
+```
+klodmem index stats
+  db: /home/yosuke/.claude/klodmem/klodmem.db (5.9 MiB)
+
+memory
+  files: 1
+
+history
+  messages: 6398 (assistant: 5402, user: 996)
+  sessions: 104
+  projects: 22
+  range: 2026-08-04T05:03:49.522Z to 2026-09-03T11:18:58.758Z
+
+by project
+  -home-yosuke-workspace-jobs-utuhealth-taji     2436 messages    24 sessions
+  -home-yosuke-workspace-personal-mayela          894 messages    13 sessions
+  ...
+```
+
+Combine it with an ingest flag to refresh then report in one command, e.g. `klodmem -ingest -stat`.
+
 ## The `search_memory` tool
 
 | Field     | Type   | Required | Description                                             |

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -29,11 +30,12 @@ func run() error {
 	ingestAll := flag.Bool("ingest", false, "index memory and history once and exit, without starting the MCP server")
 	ingestMemory := flag.Bool("ingest.memory", false, "index memory files only, once, and exit")
 	ingestHistory := flag.Bool("ingest.history", false, "index conversation history only, once, and exit")
+	stat := flag.Bool("stat", false, "print index statistics and exit, without starting the MCP server")
 	flag.Parse()
 
 	doMemory := *ingestAll || *ingestMemory
 	doHistory := *ingestAll || *ingestHistory
-	oneShot := *ingestAll || *ingestMemory || *ingestHistory
+	oneShot := *ingestAll || *ingestMemory || *ingestHistory || *stat
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -69,6 +71,9 @@ func run() error {
 				return err
 			}
 		}
+		if *stat {
+			return printStats(ctx, s, cfg.DBPath)
+		}
 		log.Info("klodmem: ingest complete")
 		return nil
 	}
@@ -101,4 +106,57 @@ func parseLevel(level string) slog.Level {
 		return slog.LevelInfo
 	}
 	return l
+}
+
+// printStats writes a human-readable index summary to stdout. Unlike the
+// rest of this binary's structured logging (which goes to stderr because
+// stdout carries the MCP protocol), -stat never starts the MCP server, so
+// stdout is free to use for the report itself.
+func printStats(ctx context.Context, s *store.Store, dbPath string) error {
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		return err
+	}
+
+	dbSize := "unknown"
+	if info, err := os.Stat(dbPath); err == nil {
+		dbSize = humanBytes(info.Size())
+	}
+
+	fmt.Println("klodmem index stats")
+	fmt.Printf("  db: %s (%s)\n\n", dbPath, dbSize)
+
+	fmt.Println("memory")
+	fmt.Printf("  files: %d\n\n", stats.MemoryFiles)
+
+	fmt.Println("history")
+	fmt.Printf("  messages: %d (assistant: %d, user: %d)\n",
+		stats.HistoryMessages, stats.RoleCounts["assistant"], stats.RoleCounts["user"])
+	fmt.Printf("  sessions: %d\n", stats.HistorySessions)
+	fmt.Printf("  projects: %d\n", stats.HistoryProjects)
+	if stats.EarliestTime != "" {
+		fmt.Printf("  range: %s to %s\n", stats.EarliestTime, stats.LatestTime)
+	}
+
+	if len(stats.ByProject) > 0 {
+		fmt.Println("\nby project")
+		for _, p := range stats.ByProject {
+			fmt.Printf("  %-60s %6d messages  %4d sessions\n", p.Project, p.Messages, p.Sessions)
+		}
+	}
+
+	return nil
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

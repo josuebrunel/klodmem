@@ -405,6 +405,89 @@ func (s *Store) SearchHistory(ctx context.Context, q HistorySearchQuery) ([]Hist
 	return results, nil
 }
 
+// ProjectStat is one project's contribution to the history index.
+type ProjectStat struct {
+	Project  string
+	Messages int
+	Sessions int
+}
+
+// Stats summarizes what's currently indexed.
+type Stats struct {
+	MemoryFiles     int
+	HistoryMessages int
+	HistorySessions int
+	HistoryProjects int
+	RoleCounts      map[string]int
+	ByProject       []ProjectStat
+	EarliestTime    string
+	LatestTime      string
+}
+
+// Stats runs aggregate queries over the index and returns a summary. It
+// reflects whatever is currently indexed — it does not scan disk itself.
+func (s *Store) Stats(ctx context.Context) (Stats, error) {
+	var stats Stats
+
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&stats.MemoryFiles); err != nil {
+		return Stats{}, fmt.Errorf("store: count memory files: %w", err)
+	}
+
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COUNT(DISTINCT session_id), COUNT(DISTINCT project) FROM history_fts
+	`).Scan(&stats.HistoryMessages, &stats.HistorySessions, &stats.HistoryProjects); err != nil {
+		return Stats{}, fmt.Errorf("store: count history: %w", err)
+	}
+
+	roleRows, err := s.db.QueryContext(ctx, `SELECT role, COUNT(*) FROM history_fts GROUP BY role`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("store: count history by role: %w", err)
+	}
+	defer func() { _ = roleRows.Close() }()
+	stats.RoleCounts = make(map[string]int)
+	for roleRows.Next() {
+		var role string
+		var n int
+		if err := roleRows.Scan(&role, &n); err != nil {
+			return Stats{}, fmt.Errorf("store: scan role count: %w", err)
+		}
+		stats.RoleCounts[role] = n
+	}
+	if err := roleRows.Err(); err != nil {
+		return Stats{}, fmt.Errorf("store: iterate role counts: %w", err)
+	}
+
+	projectRows, err := s.db.QueryContext(ctx, `
+		SELECT project, COUNT(*), COUNT(DISTINCT session_id)
+		FROM history_fts
+		GROUP BY project
+		ORDER BY COUNT(*) DESC
+	`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("store: count history by project: %w", err)
+	}
+	defer func() { _ = projectRows.Close() }()
+	for projectRows.Next() {
+		var p ProjectStat
+		if err := projectRows.Scan(&p.Project, &p.Messages, &p.Sessions); err != nil {
+			return Stats{}, fmt.Errorf("store: scan project stat: %w", err)
+		}
+		stats.ByProject = append(stats.ByProject, p)
+	}
+	if err := projectRows.Err(); err != nil {
+		return Stats{}, fmt.Errorf("store: iterate project stats: %w", err)
+	}
+
+	var earliest, latest sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT MIN(timestamp), MAX(timestamp) FROM history_fts`).Scan(&earliest, &latest); err != nil {
+		return Stats{}, fmt.Errorf("store: query history time range: %w", err)
+	}
+	stats.EarliestTime = earliest.String
+	stats.LatestTime = latest.String
+
+	return stats, nil
+}
+
 func quoteFTSTerm(term string) string {
 	return `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
 }
