@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/josuebrunel/klodmem/internal/config"
+	"github.com/josuebrunel/klodmem/internal/historyindexer"
 	"github.com/josuebrunel/klodmem/internal/indexer"
 	"github.com/josuebrunel/klodmem/internal/mcpserver"
 	"github.com/josuebrunel/klodmem/internal/store"
@@ -52,6 +53,15 @@ func run() error {
 	if err := idx.FullScan(ctx); err != nil {
 		return err
 	}
+
+	var histIdx *historyindexer.Indexer
+	if cfg.IndexHistory {
+		histIdx = historyindexer.New(cfg.MemoryRoot, s, log)
+		if err := histIdx.FullScan(ctx); err != nil {
+			return err
+		}
+	}
+
 	if *ingest {
 		log.Info("klodmem: ingest complete")
 		return nil
@@ -62,8 +72,15 @@ func run() error {
 			log.Error("klodmem: watch stopped", "error", err)
 		}
 	}()
+	if histIdx != nil {
+		go func() {
+			if err := histIdx.Watch(ctx); err != nil {
+				log.Error("klodmem: history watch stopped", "error", err)
+			}
+		}()
+	}
 
-	server := mcpserver.New(s, log)
+	server := mcpserver.New(s, log, cfg.IndexHistory)
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 

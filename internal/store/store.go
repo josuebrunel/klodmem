@@ -13,6 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/josuebrunel/klodmem/internal/memoryfile"
+	"github.com/josuebrunel/klodmem/internal/transcript"
 )
 
 const schema = `
@@ -31,6 +32,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 	name,
 	description,
 	content,
+	tokenize = 'porter'
+);
+
+CREATE TABLE IF NOT EXISTS transcript_files (
+	path        TEXT PRIMARY KEY,
+	project     TEXT NOT NULL,
+	session_id  TEXT NOT NULL,
+	byte_offset INTEGER NOT NULL,
+	mtime       INTEGER NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(
+	path UNINDEXED,
+	session_id UNINDEXED,
+	timestamp UNINDEXED,
+	project,
+	role,
+	text,
 	tokenize = 'porter'
 );
 `
@@ -229,6 +248,159 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) ([]SearchResult, erro
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: iterate search results: %w", err)
+	}
+	return results, nil
+}
+
+// TranscriptOffset returns the byte offset up to which path has already been
+// parsed, and whether a row exists (a new file starts at offset 0).
+func (s *Store) TranscriptOffset(ctx context.Context, path string) (int64, bool, error) {
+	var offset int64
+	err := s.db.QueryRowContext(ctx, `SELECT byte_offset FROM transcript_files WHERE path = ?`, path).Scan(&offset)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("store: query transcript offset for %s: %w", path, err)
+	}
+	return offset, true, nil
+}
+
+// InsertHistoryMessages records that path has been parsed up to newOffset
+// and inserts msgs (the messages found in the newly-parsed span), all in one
+// transaction. msgs may be empty (e.g. a span with no authored text).
+func (s *Store) InsertHistoryMessages(ctx context.Context, path, project, sessionID string, newOffset, mtime int64, msgs []transcript.Message) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin history insert tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO transcript_files (path, project, session_id, byte_offset, mtime)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET byte_offset = excluded.byte_offset, mtime = excluded.mtime
+	`, path, project, sessionID, newOffset, mtime); err != nil {
+		return fmt.Errorf("store: upsert transcript offset for %s: %w", path, err)
+	}
+
+	for _, m := range msgs {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO history_fts (path, session_id, timestamp, project, role, text) VALUES (?, ?, ?, ?, ?, ?)`,
+			path, m.SessionID, m.Timestamp, m.Project, m.Role, m.Text,
+		); err != nil {
+			return fmt.Errorf("store: insert history message for %s: %w", path, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit history insert for %s: %w", path, err)
+	}
+	return nil
+}
+
+// DeleteTranscript removes all indexed history for a transcript file, e.g.
+// after the session file itself was deleted.
+func (s *Store) DeleteTranscript(ctx context.Context, path string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin transcript delete tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM transcript_files WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("store: delete transcript file %s: %w", path, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM history_fts WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("store: delete history rows for %s: %w", path, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit transcript delete for %s: %w", path, err)
+	}
+	return nil
+}
+
+// AllTranscriptPaths returns every indexed transcript file path, for pruning
+// against what's actually present on disk.
+func (s *Store) AllTranscriptPaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM transcript_files`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list transcript paths: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("store: scan transcript path: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate transcript paths: %w", err)
+	}
+	return paths, nil
+}
+
+// HistorySearchQuery holds the parameters for a conversation-history search.
+type HistorySearchQuery struct {
+	Query   string
+	Project string
+	Role    string
+	Limit   int
+}
+
+// HistorySearchResult is one match returned from SearchHistory.
+type HistorySearchResult struct {
+	Path      string
+	SessionID string
+	Timestamp string
+	Project   string
+	Role      string
+	Snippet   string
+}
+
+// SearchHistory runs an FTS5 match against indexed conversation history,
+// optionally filtered by project/role, ordered by relevance.
+func (s *Store) SearchHistory(ctx context.Context, q HistorySearchQuery) ([]HistorySearchResult, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	matchExpr := sanitizeFTSQuery(q.Query)
+	if q.Project != "" {
+		matchExpr = fmt.Sprintf("project:%s AND (%s)", quoteFTSTerm(q.Project), matchExpr)
+	}
+	if q.Role != "" {
+		matchExpr = fmt.Sprintf("role:%s AND (%s)", quoteFTSTerm(q.Role), matchExpr)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT path, session_id, timestamp, project, role,
+		       snippet(history_fts, 5, '[', ']', '...', 12) AS snip
+		FROM history_fts
+		WHERE history_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, matchExpr, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: search history %q: %w", q.Query, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []HistorySearchResult
+	for rows.Next() {
+		var r HistorySearchResult
+		if err := rows.Scan(&r.Path, &r.SessionID, &r.Timestamp, &r.Project, &r.Role, &r.Snippet); err != nil {
+			return nil, fmt.Errorf("store: scan history search result: %w", err)
+		}
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate history search results: %w", err)
 	}
 	return results, nil
 }

@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/josuebrunel/klodmem/internal/memoryfile"
+	"github.com/josuebrunel/klodmem/internal/transcript"
 )
 
 func openTestStore(t *testing.T) (*Store, context.Context) {
@@ -171,5 +173,132 @@ func TestSearch(t *testing.T) {
 				t.Fatalf("Search()[0].Path = %s, want %s", results[0].Path, tt.wantHit)
 			}
 		})
+	}
+}
+
+func TestTranscriptOffsetMissing(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	_, ok, err := s.TranscriptOffset(ctx, "/proj/s1.jsonl")
+	if err != nil {
+		t.Fatalf("TranscriptOffset() error: %v", err)
+	}
+	if ok {
+		t.Fatalf("TranscriptOffset() ok = true, want false for unindexed file")
+	}
+}
+
+func TestInsertHistoryMessagesAndSearch(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	msgs := []transcript.Message{
+		{Project: "proj-a", SessionID: "s1", Role: "user", Text: "why is the build failing on CI", Timestamp: "t1"},
+		{Project: "proj-a", SessionID: "s1", Role: "assistant", Text: "the build fails because of a missing dependency", Timestamp: "t2"},
+	}
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 1234, 999, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	offset, ok, err := s.TranscriptOffset(ctx, "/proj-a/s1.jsonl")
+	if err != nil {
+		t.Fatalf("TranscriptOffset() error: %v", err)
+	}
+	if !ok || offset != 1234 {
+		t.Fatalf("TranscriptOffset() = (%d, %v), want (1234, true)", offset, ok)
+	}
+
+	results, err := s.SearchHistory(ctx, HistorySearchQuery{Query: "dependency"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 1 || results[0].Role != "assistant" {
+		t.Fatalf("SearchHistory() = %+v, want one assistant hit", results)
+	}
+	if !strings.Contains(results[0].Snippet, "dependency") {
+		t.Fatalf("SearchHistory()[0].Snippet = %q, want it to contain the matched text (not another column)", results[0].Snippet)
+	}
+
+	// Re-inserting at a later offset (simulating incremental tailing) must
+	// update the offset, not create a duplicate transcript_files row.
+	moreMsgs := []transcript.Message{
+		{Project: "proj-a", SessionID: "s1", Role: "user", Text: "thanks, that fixed it", Timestamp: "t3"},
+	}
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 5000, 1000, moreMsgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() (second span) error: %v", err)
+	}
+	offset, _, err = s.TranscriptOffset(ctx, "/proj-a/s1.jsonl")
+	if err != nil {
+		t.Fatalf("TranscriptOffset() error: %v", err)
+	}
+	if offset != 5000 {
+		t.Fatalf("TranscriptOffset() after second span = %d, want 5000", offset)
+	}
+
+	results, err = s.SearchHistory(ctx, HistorySearchQuery{Query: "fixed"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchHistory() after second span = %d results, want 1", len(results))
+	}
+}
+
+func TestSearchHistoryFilters(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	msgs := []transcript.Message{
+		{Project: "proj-a", SessionID: "s1", Role: "user", Text: "explain the retry logic", Timestamp: "t1"},
+		{Project: "proj-b", SessionID: "s2", Role: "assistant", Text: "here is the retry logic explanation", Timestamp: "t2"},
+	}
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 100, 1, msgs[:1]); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+	if err := s.InsertHistoryMessages(ctx, "/proj-b/s2.jsonl", "proj-b", "s2", 100, 1, msgs[1:]); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	results, err := s.SearchHistory(ctx, HistorySearchQuery{Query: "retry", Project: "proj-b"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 1 || results[0].SessionID != "s2" {
+		t.Fatalf("SearchHistory() project filter = %+v, want one hit from s2", results)
+	}
+
+	results, err = s.SearchHistory(ctx, HistorySearchQuery{Query: "retry", Role: "user"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 1 || results[0].SessionID != "s1" {
+		t.Fatalf("SearchHistory() role filter = %+v, want one hit from s1", results)
+	}
+}
+
+func TestDeleteTranscript(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	msgs := []transcript.Message{{Project: "proj-a", SessionID: "s1", Role: "user", Text: "hello world", Timestamp: "t1"}}
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	if err := s.DeleteTranscript(ctx, "/proj-a/s1.jsonl"); err != nil {
+		t.Fatalf("DeleteTranscript() error: %v", err)
+	}
+
+	_, ok, err := s.TranscriptOffset(ctx, "/proj-a/s1.jsonl")
+	if err != nil {
+		t.Fatalf("TranscriptOffset() error: %v", err)
+	}
+	if ok {
+		t.Fatalf("TranscriptOffset() ok = true after delete, want false")
+	}
+
+	results, err := s.SearchHistory(ctx, HistorySearchQuery{Query: "hello"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("SearchHistory() after delete = %d results, want 0", len(results))
 	}
 }

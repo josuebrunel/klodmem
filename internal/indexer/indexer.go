@@ -14,6 +14,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/josuebrunel/klodmem/internal/debounce"
 	"github.com/josuebrunel/klodmem/internal/memoryfile"
 	"github.com/josuebrunel/klodmem/internal/store"
 )
@@ -168,12 +169,12 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 		watched[dir] = struct{}{}
 	}
 
-	debounce := newDebouncer(debounceWindow, func(path string) {
+	db := debounce.New(debounceWindow, func(path string) {
 		if err := idx.indexFile(ctx, path); err != nil {
 			idx.log.Warn("indexer: reindex on change failed", "path", path, "error", err)
 		}
 	})
-	defer debounce.stop()
+	defer db.Stop()
 
 	for {
 		select {
@@ -188,12 +189,12 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			idx.handleEvent(ctx, watcher, watched, event, debounce)
+			idx.handleEvent(ctx, watcher, watched, event, db)
 		}
 	}
 }
 
-func (idx *Indexer) handleEvent(ctx context.Context, watcher *fsnotify.Watcher, watched map[string]struct{}, event fsnotify.Event, debounce *debouncer) {
+func (idx *Indexer) handleEvent(ctx context.Context, watcher *fsnotify.Watcher, watched map[string]struct{}, event fsnotify.Event, db *debounce.Debouncer) {
 	if event.Op&fsnotify.Create != 0 {
 		idx.maybeWatchNewDir(ctx, watcher, watched, event.Name)
 	}
@@ -202,7 +203,7 @@ func (idx *Indexer) handleEvent(ctx context.Context, watcher *fsnotify.Watcher, 
 		return
 	}
 	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
-		debounce.trigger(event.Name)
+		db.Trigger(event.Name)
 	}
 }
 
