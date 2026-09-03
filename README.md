@@ -88,7 +88,7 @@ Prints a summary of what's currently indexed and exits — no scanning, just a r
 
 ```
 klodmem index stats
-  db: /home/yosuke/.claude/klodmem/klodmem.db (5.9 MiB)
+  db: /home/user/.claude/klodmem/klodmem.db (5.9 MiB)
 
 memory
   files: 1
@@ -100,8 +100,8 @@ history
   range: 2026-08-04T05:03:49.522Z to 2026-09-03T11:18:58.758Z
 
 by project
-  -home-yosuke-workspace-jobs-utuhealth-taji     2436 messages    24 sessions
-  -home-yosuke-workspace-personal-mayela          894 messages    13 sessions
+  -home-user-workspace-project-alpha     2436 messages    24 sessions
+  -home-user-workspace-project-beta       894 messages    13 sessions
   ...
 ```
 
