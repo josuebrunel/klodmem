@@ -2,89 +2,87 @@
 
 [![CI](https://github.com/josuebrunel/klodmem/actions/workflows/ci.yml/badge.svg)](https://github.com/josuebrunel/klodmem/actions/workflows/ci.yml)
 
-Full-text search over Claude Code's auto-memory, across every project.
+Full-text search over Claude Code's auto-memory and raw conversation history, across every project.
 
-Claude Code writes memory files to `~/.claude/projects/<project>/memory/*.md` and only lets itself find them again through `MEMORY.md`'s one-line index entries, matched by exact keyword. Ask about "port conflicts" when the note says "docker-compose mapping" and you get nothing — and each project's memories are invisible from every other project.
+## What it gives you
 
-klodmem watches those same markdown files, indexes their frontmatter and body into a local SQLite database (FTS5 full-text search, in WAL mode), and exposes a `search_memory` tool over MCP so Claude Code can search the full content of every memory, in every project, not just the index line. The markdown files stay the source of truth — klodmem only reads them.
+Claude Code writes memory files to `~/.claude/projects/<project>/memory/*.md`, but can only find them again through `MEMORY.md`'s one-line index entries, matched by exact keyword. Ask about "port conflicts" when the note says "docker-compose mapping" and you get nothing, and each project's memories are invisible from every other project. klodmem fixes that:
 
-It also indexes your raw conversation history — every session transcript, across every project — and exposes a second `search_history` tool for finding past discussions that never made it into memory at all.
+- **Searches the full content of every memory, in every project.** Not just the `MEMORY.md` index line. Exposed to Claude as a `search_memory` tool over MCP.
+- **Searches raw conversation history too.** Every session transcript, across every project, so past discussions that never made it into memory are findable via `search_history`.
+- **Markdown stays the source of truth.** klodmem only reads your files and indexes them into a local SQLite database (FTS5 full-text search, WAL mode).
+- **Live updates.** File watchers keep memories and new conversation turns searchable while a Claude Code session is open.
 
-## Install
+## Table of contents
+
+- [Quick start](#quick-start)
+- [Other ways to install](#other-ways-to-install)
+- [How it works](#how-it-works)
+- [CLI reference](#cli-reference)
+- [Configuration](#configuration)
+- [MCP tools](#mcp-tools)
+- [Development](#development)
+
+## Quick start
 
 Requires Go 1.25+.
 
-```sh
-go install github.com/josuebrunel/klodmem/cmd/klodmem@latest
-```
+1. **Install.** This puts a `klodmem` binary in `$(go env GOPATH)/bin`, so make sure that directory is on your `PATH`.
 
-This puts a `klodmem` binary in `$(go env GOPATH)/bin` — make sure that directory is on your `PATH`.
+   ```sh
+   go install github.com/josuebrunel/klodmem/cmd/klodmem@latest
+   ```
 
-Alternatively, download a prebuilt binary from the [Releases page](https://github.com/josuebrunel/klodmem/releases) (Linux, macOS, and Windows, amd64/arm64), or clone and build locally:
+2. **Register it once as a user-scoped MCP server**, so it's available in every project:
 
-```sh
-git clone https://github.com/josuebrunel/klodmem.git
-cd klodmem
-make build   # produces ./bin/klodmem
-```
+   ```sh
+   claude mcp add --scope user klodmem -- klodmem
+   ```
 
-## Register it with Claude Code
+3. **Restart Claude Code.** New sessions can now call `search_memory` and `search_history`.
 
-Add it once as a user-scoped MCP server so it's available in every project:
+4. **Verify it's connected:**
 
-```sh
-claude mcp add --scope user klodmem -- klodmem
-```
+   ```sh
+   claude mcp get klodmem
+   ```
 
-(If you built locally instead of using `go install`, point at the binary instead: `claude mcp add --scope user klodmem -- /path/to/klodmem/bin/klodmem`.)
+That's it. Next time you're in Claude Code, just ask: *"search my memories for docker-compose port conflicts"* or *"have I debugged this error before?"*
 
-Start (or restart) a Claude Code session and you're done — Claude can now call `search_memory` and `search_history` to search across all your projects' memory files and conversation history.
+## Other ways to install
 
-Verify it's connected:
+- **Prebuilt binaries** for Linux, macOS, and Windows (amd64/arm64) from the [Releases page](https://github.com/josuebrunel/klodmem/releases).
+- **Build from source:**
 
-```sh
-claude mcp get klodmem
-```
+  ```sh
+  git clone https://github.com/josuebrunel/klodmem.git
+  cd klodmem
+  make build   # produces ./bin/klodmem
+  ```
+
+  If you built locally, point MCP at the binary when registering: `claude mcp add --scope user klodmem -- /path/to/klodmem/bin/klodmem`.
 
 ## How it works
 
-On startup klodmem scans `~/.claude/projects/*/memory/*.md` (skipping each project's `MEMORY.md` index file itself), parses the YAML frontmatter (`name`, `description`, `metadata.type`) and body of every memory, and indexes it into a SQLite FTS5 table. It also scans every `~/.claude/projects/*/<session-id>.jsonl` conversation transcript, incrementally (only newly-appended lines on each subsequent scan). Both keep watching for changes for as long as the MCP session is open, so memories and conversation turns are searchable immediately.
+On startup klodmem scans `~/.claude/projects/*/memory/*.md` (skipping each project's `MEMORY.md` index file), parses the YAML frontmatter and body of every memory, and indexes it into a SQLite FTS5 table. It also scans every `~/.claude/projects/*/<session-id>.jsonl` transcript, incrementally (only newly-appended lines each scan). Both keep watching for changes for as long as the MCP session is open.
 
-The index lives at `~/.claude/klodmem/klodmem.db` by default and is safe to delete — klodmem rebuilds it from the markdown files on next start.
+The index lives at `~/.claude/klodmem/klodmem.db` by default. It's safe to delete: klodmem rebuilds it from your markdown files on next start.
 
-## Configuration
+## CLI reference
 
-All settings are optional environment variables:
+Running `klodmem` with no flags starts the MCP server, which is the normal way to use it. The flags below run one-off jobs instead:
 
-| Variable                | Default                      | Meaning                                   |
-|--------------------------|-------------------------------|--------------------------------------------|
-| `KLODMEM_MEMORY_ROOT`    | `~/.claude/projects`           | Root directory to scan for `*/memory/*.md` |
-| `KLODMEM_DB_PATH`        | `~/.claude/klodmem/klodmem.db` | SQLite index file location                 |
-| `KLODMEM_LOG_LEVEL`      | `info`                         | `debug`, `info`, `warn`, or `error`        |
+| Command               | Does what                                                                        |
+|------------------------|----------------------------------------------------------------------------------|
+| `klodmem`              | Start the MCP server (scan then watch, with live search)                        |
+| `klodmem -ingest`      | Index memory and history once, then exit                                         |
+| `klodmem -ingest.memory` | Index memory files only, then exit                                             |
+| `klodmem -ingest.history` | Index conversation history only, then exit                                    |
+| `klodmem -stat`        | Print index statistics and exit, no scanning                                     |
 
-Pass them via `-e` when registering, e.g.:
+One-shot ingest is handy for warming the index right after installing, verifying indexing works, or running periodically from cron independent of any Claude Code session.
 
-```sh
-claude mcp add --scope user klodmem -e KLODMEM_LOG_LEVEL=debug -- klodmem
-```
-
-### One-shot indexing
-
-Run a scan and exit, without starting the MCP server or the live file watchers — useful for warming the index right after installing, verifying indexing works, or running periodically from cron independent of any Claude Code session:
-
-```sh
-klodmem -ingest            # memory and history
-klodmem -ingest.memory     # memory only
-klodmem -ingest.history    # history only
-```
-
-### Inspecting the index (`-stat`)
-
-```sh
-klodmem -stat
-```
-
-Prints a summary of what's currently indexed and exits — no scanning, just a report on the index as it stands right now:
+`-stat` prints a summary of what's currently indexed. Combine it with an ingest flag to refresh then report in one command, e.g. `klodmem -ingest -stat`:
 
 ```
 klodmem index stats
@@ -105,9 +103,27 @@ by project
   ...
 ```
 
-Combine it with an ingest flag to refresh then report in one command, e.g. `klodmem -ingest -stat`.
+## Configuration
 
-## The `search_memory` tool
+All settings are optional environment variables:
+
+| Variable                | Default                      | Meaning                                   |
+|--------------------------|-------------------------------|--------------------------------------------|
+| `KLODMEM_MEMORY_ROOT`    | `~/.claude/projects`           | Root directory to scan for `*/memory/*.md` |
+| `KLODMEM_DB_PATH`        | `~/.claude/klodmem/klodmem.db` | SQLite index file location                 |
+| `KLODMEM_LOG_LEVEL`      | `info`                         | `debug`, `info`, `warn`, or `error`        |
+
+Pass them via `-e` when registering:
+
+```sh
+claude mcp add --scope user klodmem -e KLODMEM_LOG_LEVEL=debug -- klodmem
+```
+
+## MCP tools
+
+### `search_memory`
+
+Full-text search over every project's memory files.
 
 | Field     | Type   | Required | Description                                             |
 |-----------|--------|----------|-----------------------------------------------------------|
@@ -116,19 +132,13 @@ Combine it with an ingest flag to refresh then report in one command, e.g. `klod
 | `type`    | string | no       | Restrict to `user`, `feedback`, `project`, or `reference` |
 | `limit`   | int    | no       | Max results (default 10)                                 |
 
-Each result includes the matching project, type, name, description, a snippet of the matched text, and the file path — so Claude can read the full memory file for complete context.
+Each result includes the matching project, type, name, description, a snippet of the matched text, and the file path, so Claude can read the full memory file for complete context.
 
-## Conversation history search
+### `search_history`
 
-`search_memory` only covers curated memory — the things Claude decided were worth writing down. Most of a conversation isn't that: it's the actual debugging, the code you pasted, the back-and-forth that never got distilled into a memory file. klodmem also indexes every session transcript (`~/.claude/projects/<project>/<session-id>.jsonl`) and exposes a `search_history` tool for it, so you can find past conversations directly ("did I already debug this exact error").
+`search_memory` only covers curated memory, the things Claude decided were worth writing down. Most of a conversation isn't that: the actual debugging, the code you pasted, the back-and-forth that never got distilled into a file. klodmem also indexes every session transcript and exposes `search_history` for it, so past conversations are directly findable.
 
-A few things worth knowing about how this differs from memory search:
-
-- **It indexes more, and rawer, content.** Only the authored text of user/assistant turns is extracted — never tool input/output, file contents, thinking blocks, or images — but that's still your literal typed messages and Claude's literal responses, unfiltered by the curation `search_memory` relies on.
-- **It's a separate, larger index.** Transcripts are typically much bigger than memory files; expect the SQLite index to grow accordingly, and expect a one-time cost the first time it scans your existing history (a few seconds per few hundred MB, incremental after that).
-- **Subagent transcripts aren't indexed** — only each session's own top-level transcript.
-
-### The `search_history` tool
+Full-text search over raw session transcripts across every project.
 
 | Field     | Type   | Required | Description                                    |
 |-----------|--------|----------|--------------------------------------------------|
@@ -138,6 +148,12 @@ A few things worth knowing about how this differs from memory search:
 | `limit`   | int    | no       | Max results (default 10)                        |
 
 Each result includes the project, role, timestamp, a snippet of the matched text, the session ID, and the transcript file path.
+
+A few differences from memory search worth knowing:
+
+- **Rawner content.** Only the authored text of user/assistant turns is extracted, never tool input/output, file contents, thinking blocks, or images. But that's your literal typed messages and Claude's literal responses, unfiltered by curation.
+- **A bigger index.** Transcripts are typically much larger than memory files, so expect the SQLite index to grow accordingly. The first scan of existing history has a one-time cost (a few seconds per few hundred MB); after that it's incremental.
+- **No subagent transcripts.** Only each session's own top-level transcript is indexed.
 
 ## Development
 
