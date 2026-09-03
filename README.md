@@ -66,6 +66,14 @@ Pass them via `-e` when registering, e.g.:
 claude mcp add --scope user klodmem -e KLODMEM_LOG_LEVEL=debug -- klodmem
 ```
 
+### One-shot indexing (`-ingest`)
+
+```sh
+klodmem -ingest
+```
+
+Runs a single scan of `KLODMEM_MEMORY_ROOT` into the index and exits — it doesn't start the MCP server or the live file watcher. Useful for warming the index right after installing, verifying indexing works, or running it periodically from cron independent of any Claude Code session.
+
 ## The `search_memory` tool
 
 | Field     | Type   | Required | Description                                             |

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -24,6 +25,9 @@ func main() {
 }
 
 func run() error {
+	ingest := flag.Bool("ingest", false, "index memory files once and exit, without starting the MCP server")
+	flag.Parse()
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -47,6 +51,10 @@ func run() error {
 	idx := indexer.New(cfg.MemoryRoot, s, log)
 	if err := idx.FullScan(ctx); err != nil {
 		return err
+	}
+	if *ingest {
+		log.Info("klodmem: ingest complete")
+		return nil
 	}
 
 	go func() {
