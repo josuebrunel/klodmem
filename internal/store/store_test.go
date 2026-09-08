@@ -65,6 +65,80 @@ func TestUpsertAndFileMTime(t *testing.T) {
 	}
 }
 
+func TestAllPaths(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	paths, err := s.AllPaths(ctx)
+	if err != nil {
+		t.Fatalf("AllPaths() error: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("AllPaths() on empty store = %v, want empty", paths)
+	}
+
+	want := []string{"/proj-a/memory/one.md", "/proj-b/memory/two.md"}
+	for _, p := range want {
+		if err := s.UpsertFile(ctx, memoryfile.Memory{
+			Path: p, Project: "proj", Name: "n", Type: "project", Description: "d", Content: "c", MTime: 1,
+		}); err != nil {
+			t.Fatalf("UpsertFile(%s) error: %v", p, err)
+		}
+	}
+
+	paths, err = s.AllPaths(ctx)
+	if err != nil {
+		t.Fatalf("AllPaths() error: %v", err)
+	}
+	if !sameElements(paths, want) {
+		t.Fatalf("AllPaths() = %v, want %v", paths, want)
+	}
+}
+
+func TestAllTranscriptPaths(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	paths, err := s.AllTranscriptPaths(ctx)
+	if err != nil {
+		t.Fatalf("AllTranscriptPaths() error: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("AllTranscriptPaths() on empty store = %v, want empty", paths)
+	}
+
+	want := []string{"/proj-a/s1.jsonl", "/proj-b/s2.jsonl"}
+	msgs := []transcript.Message{{Project: "proj-a", SessionID: "s1", Role: "user", Text: "hi", Timestamp: "t1"}}
+	if err := s.InsertHistoryMessages(ctx, want[0], "proj-a", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+	if err := s.InsertHistoryMessages(ctx, want[1], "proj-b", "s2", 100, 1, nil); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	paths, err = s.AllTranscriptPaths(ctx)
+	if err != nil {
+		t.Fatalf("AllTranscriptPaths() error: %v", err)
+	}
+	if !sameElements(paths, want) {
+		t.Fatalf("AllTranscriptPaths() = %v, want %v", paths, want)
+	}
+}
+
+func sameElements(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := make(map[string]bool, len(want))
+	for _, w := range want {
+		seen[w] = true
+	}
+	for _, g := range got {
+		if !seen[g] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestFileMTimeMissing(t *testing.T) {
 	s, ctx := openTestStore(t)
 
