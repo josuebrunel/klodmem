@@ -210,7 +210,7 @@ func TestNew(t *testing.T) {
 		t.Fatalf("UpsertFile() error: %v", err)
 	}
 
-	server := New(s, nil) // nil logger exercises the slog.Default() fallback
+	server := New(s, nil, "") // nil logger and empty version exercise their fallback branches
 
 	t1, t2 := mcp.NewInMemoryTransports()
 
@@ -226,6 +226,10 @@ func TestNew(t *testing.T) {
 		t.Fatalf("client.Connect() error: %v", err)
 	}
 	t.Cleanup(func() { _ = clientSession.Close() })
+
+	if got := clientSession.InitializeResult().ServerInfo.Version; got != "dev" {
+		t.Fatalf("ServerInfo.Version = %q, want %q (empty version param falls back to \"dev\")", got, "dev")
+	}
 
 	toolList, err := clientSession.ListTools(ctx, nil)
 	if err != nil {

@@ -30,13 +30,17 @@ type HistorySearchInput struct {
 }
 
 // New builds an MCP server exposing search_memory and search_history, both
-// backed by s.
-func New(s *store.Store, log *slog.Logger) *mcp.Server {
+// backed by s. version is reported to clients as the server implementation
+// version; an empty string falls back to "dev".
+func New(s *store.Store, log *slog.Logger, version string) *mcp.Server {
 	if log == nil {
 		log = slog.Default()
 	}
+	if version == "" {
+		version = "dev"
+	}
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "klodmem", Version: "0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "klodmem", Version: version}, nil)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_memory",

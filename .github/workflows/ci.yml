@@ -52,6 +52,8 @@ jobs:
             goarch: amd64
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -67,7 +69,8 @@ jobs:
           mkdir -p dist
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -trimpath -ldflags="-s -w" \
+          VERSION=$(git describe --tags --always --dirty)
+          go build -trimpath -ldflags="-s -w -X main.version=$VERSION" \
             -o "dist/klodmem-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" \
             ./cmd/klodmem
 

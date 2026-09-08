@@ -79,6 +79,7 @@ Running `klodmem` with no flags starts the MCP server, which is the normal way t
 | `klodmem -ingest.memory` | Index memory files only, then exit                                             |
 | `klodmem -ingest.history` | Index conversation history only, then exit                                    |
 | `klodmem -stat`        | Print index statistics and exit, no scanning                                     |
+| `klodmem -version`     | Print the klodmem version and exit                                               |
 
 One-shot ingest is handy for warming the index right after installing, verifying indexing works, or running periodically from cron independent of any Claude Code session.
 

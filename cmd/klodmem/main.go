@@ -19,6 +19,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// version is set at build time via -ldflags "-X main.version=...". It falls
+// back to "dev" for `go run`/`go build` without that flag.
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("klodmem: fatal", "error", err)
@@ -31,7 +35,13 @@ func run() error {
 	ingestMemory := flag.Bool("ingest.memory", false, "index memory files only, once, and exit")
 	ingestHistory := flag.Bool("ingest.history", false, "index conversation history only, once, and exit")
 	stat := flag.Bool("stat", false, "print index statistics and exit, without starting the MCP server")
+	showVersion := flag.Bool("version", false, "print the klodmem version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("klodmem", version)
+		return nil
+	}
 
 	doMemory := *ingestAll || *ingestMemory
 	doHistory := *ingestAll || *ingestHistory
@@ -96,7 +106,7 @@ func run() error {
 		}
 	}()
 
-	server := mcpserver.New(s, log)
+	server := mcpserver.New(s, log, version)
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 
