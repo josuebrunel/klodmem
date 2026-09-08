@@ -210,6 +210,46 @@ func TestWatchIndexesAppendedLines(t *testing.T) {
 	}
 }
 
+// TestSetupWatcherCatchesEventsBeforeWatchLoopStarts is a regression test
+// for the startup race between an initial FullScan and Watch registration:
+// it proves that once SetupWatcher has registered a watch, a transcript
+// append that happens before WatchLoop starts consuming events isn't lost —
+// the OS queues it and WatchLoop picks it up as soon as it starts running.
+func TestSetupWatcherCatchesEventsBeforeWatchLoopStarts(t *testing.T) {
+	idx, s, root, ctx := newTestIndexer(t)
+	path := writeTranscript(t, root, "proj-a", "s1", userLine("s1", "initial line"))
+
+	watcher, watched, err := idx.SetupWatcher(ctx)
+	if err != nil {
+		t.Fatalf("SetupWatcher() error: %v", err)
+	}
+
+	// Simulate an append happening while a caller is busy elsewhere (e.g. a
+	// slow initial FullScan) before WatchLoop has started running.
+	appendTranscript(t, path, assistantLine("s1", "missing dependency in go.mod"))
+	time.Sleep(100 * time.Millisecond)
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- idx.WatchLoop(watchCtx, watcher, watched) }()
+
+	waitFor(t, 3*time.Second, func() bool {
+		results, err := s.SearchHistory(ctx, store.HistorySearchQuery{Query: "dependency"})
+		return err == nil && len(results) == 1
+	})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WatchLoop() returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WatchLoop() did not return after context cancellation")
+	}
+}
+
 func TestWatchDiscoversNewProjectDirectory(t *testing.T) {
 	idx, s, root, ctx := newTestIndexer(t)
 

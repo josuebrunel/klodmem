@@ -88,6 +88,21 @@ func run() error {
 		return nil
 	}
 
+	// Register filesystem watches before the initial full scans, not after:
+	// the OS starts queuing events for an already-registered watch right
+	// away, independent of whether we've started reading from it, so this
+	// closes the window where a file changed during a scan (which can take a
+	// few seconds on a large history) would otherwise go unnoticed until the
+	// next restart.
+	watcher, watched, err := idx.SetupWatcher(ctx)
+	if err != nil {
+		return err
+	}
+	histWatcher, histWatched, err := histIdx.SetupWatcher(ctx)
+	if err != nil {
+		return err
+	}
+
 	if err := idx.FullScan(ctx); err != nil {
 		return err
 	}
@@ -96,12 +111,12 @@ func run() error {
 	}
 
 	go func() {
-		if err := idx.Watch(ctx); err != nil {
+		if err := idx.WatchLoop(ctx, watcher, watched); err != nil {
 			log.Error("klodmem: watch stopped", "error", err)
 		}
 	}()
 	go func() {
-		if err := histIdx.Watch(ctx); err != nil {
+		if err := histIdx.WatchLoop(ctx, histWatcher, histWatched); err != nil {
 			log.Error("klodmem: history watch stopped", "error", err)
 		}
 	}()

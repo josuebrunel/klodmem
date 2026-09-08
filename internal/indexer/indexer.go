@@ -140,34 +140,47 @@ func isMemoryFile(name string) bool {
 	return strings.HasSuffix(name, ".md") && name != indexFileName
 }
 
-// Watch runs until ctx is canceled, keeping the store in sync as memory files
-// are created, modified, or removed, and picking up newly-created project
-// directories under root.
-func (idx *Indexer) Watch(ctx context.Context) error {
+// SetupWatcher creates the fsnotify watcher and registers watches on root and
+// its existing memory directories, without consuming any events yet. It's
+// split out from WatchLoop so a caller can register watches *before* running
+// an initial FullScan: the OS queues events for an already-registered watch
+// (independent of whether anything is reading watcher.Events yet), so
+// running SetupWatcher first closes the race where a file changed during the
+// scan would otherwise go unnoticed until the next restart.
+func (idx *Indexer) SetupWatcher(ctx context.Context) (*fsnotify.Watcher, map[string]struct{}, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return fmt.Errorf("indexer: create watcher: %w", err)
+		return nil, nil, fmt.Errorf("indexer: create watcher: %w", err)
 	}
-	defer func() { _ = watcher.Close() }()
 
 	if err := watcher.Add(idx.root); err != nil {
-		return fmt.Errorf("indexer: watch root %s: %w", idx.root, err)
+		_ = watcher.Close()
+		return nil, nil, fmt.Errorf("indexer: watch root %s: %w", idx.root, err)
 	}
 
 	memoryDirs, err := idx.memoryDirs()
 	if err != nil {
-		return err
+		_ = watcher.Close()
+		return nil, nil, err
 	}
+	watched := make(map[string]struct{}, len(memoryDirs))
 	for _, dir := range memoryDirs {
 		if err := watcher.Add(dir); err != nil {
 			idx.log.Warn("indexer: watch memory dir failed", "dir", dir, "error", err)
 			continue
 		}
-	}
-	watched := make(map[string]struct{}, len(memoryDirs))
-	for _, dir := range memoryDirs {
 		watched[dir] = struct{}{}
 	}
+
+	return watcher, watched, nil
+}
+
+// WatchLoop runs until ctx is canceled, keeping the store in sync as memory
+// files are created, modified, or removed, and picking up newly-created
+// project directories under root. watcher and watched come from a prior call
+// to SetupWatcher; WatchLoop closes watcher before returning.
+func (idx *Indexer) WatchLoop(ctx context.Context, watcher *fsnotify.Watcher, watched map[string]struct{}) error {
+	defer func() { _ = watcher.Close() }()
 
 	db := debounce.New(debounceWindow, func(path string) {
 		if err := idx.indexFile(ctx, path); err != nil {
@@ -192,6 +205,19 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 			idx.handleEvent(ctx, watcher, watched, event, db)
 		}
 	}
+}
+
+// Watch runs until ctx is canceled, keeping the store in sync as memory files
+// are created, modified, or removed, and picking up newly-created project
+// directories under root. It's SetupWatcher followed by WatchLoop; callers
+// that want to avoid missing changes during an initial FullScan should call
+// those two steps separately instead (see SetupWatcher).
+func (idx *Indexer) Watch(ctx context.Context) error {
+	watcher, watched, err := idx.SetupWatcher(ctx)
+	if err != nil {
+		return err
+	}
+	return idx.WatchLoop(ctx, watcher, watched)
 }
 
 func (idx *Indexer) handleEvent(ctx context.Context, watcher *fsnotify.Watcher, watched map[string]struct{}, event fsnotify.Event, db *debounce.Debouncer) {
