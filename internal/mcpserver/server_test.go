@@ -199,6 +199,72 @@ func TestFormatResults(t *testing.T) {
 	}
 }
 
+func TestNew(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	if err := s.UpsertFile(ctx, memoryfile.Memory{
+		Path: "/proj-a/memory/db_choice.md", Project: "proj-a", Name: "db-choice",
+		Type: "project", Description: "using postgres", Content: "We chose postgres for durability.",
+		MTime: 1,
+	}); err != nil {
+		t.Fatalf("UpsertFile() error: %v", err)
+	}
+
+	server := New(s, nil) // nil logger exercises the slog.Default() fallback
+
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	serverSession, err := server.Connect(ctx, t1, nil)
+	if err != nil {
+		t.Fatalf("server.Connect() error: %v", err)
+	}
+	t.Cleanup(func() { _ = serverSession.Close() })
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil)
+	clientSession, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error: %v", err)
+	}
+	t.Cleanup(func() { _ = clientSession.Close() })
+
+	toolList, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error: %v", err)
+	}
+	names := make(map[string]bool, len(toolList.Tools))
+	for _, tool := range toolList.Tools {
+		names[tool.Name] = true
+	}
+	if !names["search_memory"] || !names["search_history"] {
+		t.Fatalf("ListTools() = %v, want both search_memory and search_history registered", names)
+	}
+
+	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_memory",
+		Arguments: map[string]any{"query": "durability"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search_memory) error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("CallTool(search_memory) IsError = true, want a successful hit")
+	}
+	if text := contentText(res); !strings.Contains(text, "db-choice") {
+		t.Fatalf("CallTool(search_memory) text = %q, want it to contain %q", text, "db-choice")
+	}
+
+	res, err = clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_memory",
+		Arguments: map[string]any{"query": ""},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search_memory, empty query) error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("CallTool(search_memory, empty query) IsError = false, want true")
+	}
+}
+
 func TestFormatHistoryResults(t *testing.T) {
 	if got := formatHistoryResults(nil); got != "" {
 		t.Fatalf("formatHistoryResults(nil) = %q, want empty string", got)
