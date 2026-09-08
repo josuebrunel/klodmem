@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -55,7 +56,7 @@ func New(s *store.Store, log *slog.Logger) *mcp.Server {
 }
 
 func handleSearchMemory(ctx context.Context, s *store.Store, log *slog.Logger, in SearchInput) (*mcp.CallToolResult, any, error) {
-	if in.Query == "" {
+	if strings.TrimSpace(in.Query) == "" {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "query must not be empty"}},
 			IsError: true,
@@ -101,7 +102,7 @@ func formatResults(results []store.SearchResult) string {
 }
 
 func handleSearchHistory(ctx context.Context, s *store.Store, log *slog.Logger, in HistorySearchInput) (*mcp.CallToolResult, any, error) {
-	if in.Query == "" {
+	if strings.TrimSpace(in.Query) == "" {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "query must not be empty"}},
 			IsError: true,

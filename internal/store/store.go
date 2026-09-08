@@ -218,6 +218,9 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) ([]SearchResult, erro
 	}
 
 	matchExpr := sanitizeFTSQuery(q.Query)
+	if matchExpr == "" {
+		return nil, fmt.Errorf("store: search: empty query")
+	}
 	if q.Project != "" {
 		matchExpr = fmt.Sprintf("project:%s AND (%s)", quoteFTSTerm(q.Project), matchExpr)
 	}
@@ -371,6 +374,9 @@ func (s *Store) SearchHistory(ctx context.Context, q HistorySearchQuery) ([]Hist
 	}
 
 	matchExpr := sanitizeFTSQuery(q.Query)
+	if matchExpr == "" {
+		return nil, fmt.Errorf("store: search history: empty query")
+	}
 	if q.Project != "" {
 		matchExpr = fmt.Sprintf("project:%s AND (%s)", quoteFTSTerm(q.Project), matchExpr)
 	}

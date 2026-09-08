@@ -176,6 +176,16 @@ func TestSearch(t *testing.T) {
 	}
 }
 
+func TestSearchEmptyQuery(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	for _, q := range []string{"", "   ", "\t\n"} {
+		if _, err := s.Search(ctx, SearchQuery{Query: q}); err == nil {
+			t.Fatalf("Search(%q) error = nil, want an error for a blank query", q)
+		}
+	}
+}
+
 func TestTranscriptOffsetMissing(t *testing.T) {
 	s, ctx := openTestStore(t)
 
@@ -271,6 +281,16 @@ func TestSearchHistoryFilters(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].SessionID != "s1" {
 		t.Fatalf("SearchHistory() role filter = %+v, want one hit from s1", results)
+	}
+}
+
+func TestSearchHistoryEmptyQuery(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	for _, q := range []string{"", "   ", "\t\n"} {
+		if _, err := s.SearchHistory(ctx, HistorySearchQuery{Query: q}); err == nil {
+			t.Fatalf("SearchHistory(%q) error = nil, want an error for a blank query", q)
+		}
 	}
 }
 
