@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/josuebrunel/klodmem/actions/workflows/ci.yml/badge.svg)](https://github.com/josuebrunel/klodmem/actions/workflows/ci.yml)
 
-Full-text search over Claude Code's auto-memory and raw conversation history, across every project.
+Claude forgot what you two solved last week? klodmem gives Claude Code full-text search over its auto-memory and your raw conversation history, across every project. Local-first, one Go binary, no cloud.
 
 ## What it gives you
 
@@ -13,8 +13,28 @@ Claude Code writes memory files to `~/.claude/projects/<project>/memory/*.md`, b
 - **Markdown stays the source of truth.** klodmem only reads your files and indexes them into a local SQLite database (FTS5 full-text search, WAL mode).
 - **Live updates.** File watchers keep memories and new conversation turns searchable while a Claude Code session is open.
 
+## See it in action
+
+Ask Claude Code in any project:
+
+> *"Have I debugged this `connection refused` error before?"*
+
+Claude calls `search_history`, finds the session from three weeks ago in a different project where you fixed it, and brings back the answer instead of starting from scratch.
+
+> *"Search my memories for docker-compose port conflicts."*
+
+Claude calls `search_memory` and finds the note even if it was filed under "compose mapping".
+
+## Why klodmem
+
+- **Local and private.** Everything stays on your machine. klodmem makes no network calls and only reads your files.
+- **Zero setup.** One binary, one `claude mcp add` command. No server, no API key, no config required.
+- **Safe to try.** Your markdown stays the source of truth. Delete the index at any time and klodmem rebuilds it.
+- **Fast.** SQLite FTS5 with live file watching, so new memories and turns are searchable right away.
+
 ## Table of contents
 
+- [See it in action](#see-it-in-action)
 - [Quick start](#quick-start)
 - [Other ways to install](#other-ways-to-install)
 - [How it works](#how-it-works)
@@ -25,9 +45,21 @@ Claude Code writes memory files to `~/.claude/projects/<project>/memory/*.md`, b
 
 ## Quick start
 
-Requires Go 1.25+.
+1. **Install.** No Go toolchain needed if you use a prebuilt binary. Pick one:
 
-1. **Install.** This puts a `klodmem` binary in `$(go env GOPATH)/bin`, so make sure that directory is on your `PATH`.
+   **Prebuilt binary** (Linux, macOS, Windows). Replace the suffix with your platform: `linux-amd64`, `linux-arm64`, `darwin-amd64`, or `darwin-arm64`.
+
+   ```sh
+   curl -L -o klodmem https://github.com/josuebrunel/klodmem/releases/latest/download/klodmem-darwin-arm64
+   chmod +x klodmem
+   sudo mv klodmem /usr/local/bin/
+   ```
+
+   Each release also ships a `checksums.txt` (SHA-256) so you can verify the download with `sha256sum -c --ignore-missing checksums.txt`.
+
+   On macOS, if Gatekeeper blocks the unsigned binary, run `xattr -d com.apple.quarantine /usr/local/bin/klodmem`. On Windows, download `klodmem-windows-amd64.exe` from the [Releases page](https://github.com/josuebrunel/klodmem/releases) and put it somewhere on your `PATH`.
+
+   **With Go 1.25+.** This puts a `klodmem` binary in `$(go env GOPATH)/bin`, so make sure that directory is on your `PATH`.
 
    ```sh
    go install github.com/josuebrunel/klodmem/cmd/klodmem@latest
@@ -51,7 +83,7 @@ That's it. Next time you're in Claude Code, just ask: *"search my memories for d
 
 ## Other ways to install
 
-- **Prebuilt binaries** for Linux, macOS, and Windows (amd64/arm64) from the [Releases page](https://github.com/josuebrunel/klodmem/releases).
+- **Prebuilt binaries** for Linux and macOS (amd64/arm64) and Windows (amd64) from the [Releases page](https://github.com/josuebrunel/klodmem/releases).
 - **Build from source:**
 
   ```sh
@@ -152,9 +184,13 @@ Each result includes the project, role, timestamp, a snippet of the matched text
 
 A few differences from memory search worth knowing:
 
-- **Rawner content.** Only the authored text of user/assistant turns is extracted, never tool input/output, file contents, thinking blocks, or images. But that's your literal typed messages and Claude's literal responses, unfiltered by curation.
+- **Rawer content.** Only the authored text of user/assistant turns is extracted, never tool input/output, file contents, thinking blocks, or images. But that's your literal typed messages and Claude's literal responses, unfiltered by curation.
 - **A bigger index.** Transcripts are typically much larger than memory files, so expect the SQLite index to grow accordingly. The first scan of existing history has a one-time cost (a few seconds per few hundred MB); after that it's incremental.
 - **No subagent transcripts.** Only each session's own top-level transcript is indexed.
+
+## Contributing
+
+Issues and pull requests are welcome. Run `make test` and `make lint` before opening a PR. If something doesn't index or search the way you expect, `klodmem -stat` and `KLODMEM_LOG_LEVEL=debug` are the best places to start, and including their output in an issue helps a lot.
 
 ## Development
 

@@ -91,6 +91,10 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum klodmem-* > checksums.txt
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
