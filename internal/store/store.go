@@ -466,6 +466,68 @@ func (s *Store) SearchHistory(ctx context.Context, q HistorySearchQuery) ([]Hist
 	return results, nil
 }
 
+// ResetReport is one table's contribution to a reset: its name and how many
+// rows it held before the reset cleared it.
+type ResetReport struct {
+	Table string
+	Rows  int64
+}
+
+// ResetMemory clears the memory index: the file records and their FTS rows.
+// The markdown files are untouched, so a scan afterwards rebuilds it.
+func (s *Store) ResetMemory(ctx context.Context) ([]ResetReport, error) {
+	return s.reset(ctx, "files", "memory_fts")
+}
+
+// ResetHistory clears the conversation-history index. transcript_files holds
+// each transcript's byte offset, so clearing it makes the next scan re-read
+// every transcript from the start. history_messages holds the message
+// identities that gate inserts (see insertHistoryMessage), so it has to go
+// too: leave it behind and every message would still count as already
+// indexed, and the re-index would silently do nothing.
+func (s *Store) ResetHistory(ctx context.Context) ([]ResetReport, error) {
+	return s.reset(ctx, "transcript_files", "history_fts", "history_messages")
+}
+
+// Vacuum rewrites the database file, returning the space a reset freed to the
+// filesystem. Deleting rows leaves the file at its high-water mark, so a reset
+// on a large index reclaims nothing until this runs. SQLite refuses to VACUUM
+// inside a transaction, so it runs on its own.
+func (s *Store) Vacuum(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
+		return fmt.Errorf("store: vacuum: %w", err)
+	}
+	return nil
+}
+
+// reset empties tables in one transaction, reporting what each held. The
+// table names are constants from this package, never caller input.
+func (s *Store) reset(ctx context.Context, tables ...string) ([]ResetReport, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin reset tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	reports := make([]ResetReport, 0, len(tables))
+	for _, table := range tables {
+		res, err := tx.ExecContext(ctx, `DELETE FROM `+table)
+		if err != nil {
+			return nil, fmt.Errorf("store: clear %s: %w", table, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("store: count rows cleared from %s: %w", table, err)
+		}
+		reports = append(reports, ResetReport{Table: table, Rows: n})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit reset: %w", err)
+	}
+	return reports, nil
+}
+
 // ProjectStat is one project's contribution to the history index.
 type ProjectStat struct {
 	Project  string

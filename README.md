@@ -29,7 +29,7 @@ Claude calls `search_memory` and finds the note even if it was filed under "comp
 
 - **Local and private.** Everything stays on your machine. klodmem makes no network calls and only reads your files.
 - **Zero setup.** One binary, one `claude mcp add` command. No server, no API key, no config required.
-- **Safe to try.** Your markdown stays the source of truth. Delete the index at any time and klodmem rebuilds it.
+- **Safe to try.** Your markdown stays the source of truth, so the index is disposable. `klodmem -reset` rebuilds it from scratch whenever you want.
 - **Fast.** SQLite FTS5 with live file watching, so new memories and turns are searchable right away.
 
 ## Table of contents
@@ -98,7 +98,7 @@ That's it. Next time you're in Claude Code, just ask: *"search my memories for d
 
 On startup klodmem scans `~/.claude/projects/*/memory/*.md` (skipping each project's `MEMORY.md` index file), parses the YAML frontmatter and body of every memory, and indexes it into a SQLite FTS5 table. It also scans every `~/.claude/projects/*/<session-id>.jsonl` transcript, incrementally (only newly-appended lines each scan). Both keep watching for changes for as long as the MCP session is open.
 
-The index lives at `~/.claude/klodmem/klodmem.db` by default. It's safe to delete: klodmem rebuilds it from your markdown files on next start.
+The index lives at `~/.claude/klodmem/klodmem.db` by default, and it's disposable: klodmem rebuilds it from your files. `klodmem -reset` rebuilds it in place, which works even while other klodmem processes have the database open. Deleting the file by hand works too, but only while no MCP client is using it.
 
 ## CLI reference
 
@@ -110,10 +110,21 @@ Running `klodmem` with no flags starts the MCP server, which is the normal way t
 | `klodmem -ingest`      | Index memory and history once, then exit                                         |
 | `klodmem -ingest.memory` | Index memory files only, then exit                                             |
 | `klodmem -ingest.history` | Index conversation history only, then exit                                    |
+| `klodmem -reset`       | Truncate the index and re-index memory and history, then exit                     |
+| `klodmem -reset.memory` | Truncate the memory index and re-index it, then exit                            |
+| `klodmem -reset.history` | Truncate the conversation history index and re-index it, then exit              |
 | `klodmem -stat`        | Print index statistics and exit, no scanning                                     |
 | `klodmem -version`     | Print the klodmem version and exit                                               |
 
 One-shot ingest is handy for warming the index right after installing, verifying indexing works, or running periodically from cron independent of any Claude Code session.
+
+`-reset` starts the index over: it truncates the tables, compacts the database, and re-indexes from your files, which are never touched. Reach for it when an index written by an older version needs cleaning, when the database has grown past what the transcripts justify, or when anything about the index looks wrong and you don't want to reason about why. It clears rows instead of deleting the database file, so it's safe to run while other klodmem processes have the same database open: they see the cleared index and re-read from the start on their next scan. Combine it with `-stat` to see the result in one command:
+
+```sh
+klodmem -reset -stat
+```
+
+A single `-reset` does the work of `-reset.memory -reset.history`, and both imply the matching `-ingest` flags.
 
 `-stat` prints a summary of what's currently indexed. Combine it with an ingest flag to refresh then report in one command, e.g. `klodmem -ingest -stat`:
 

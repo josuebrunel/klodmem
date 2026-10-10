@@ -34,6 +34,9 @@ func run() error {
 	ingestAll := flag.Bool("ingest", false, "index memory and history once and exit, without starting the MCP server")
 	ingestMemory := flag.Bool("ingest.memory", false, "index memory files only, once, and exit")
 	ingestHistory := flag.Bool("ingest.history", false, "index conversation history only, once, and exit")
+	resetAll := flag.Bool("reset", false, "truncate the index and re-index memory and history, then exit")
+	resetMemory := flag.Bool("reset.memory", false, "truncate the memory index and re-index it, then exit")
+	resetHistory := flag.Bool("reset.history", false, "truncate the conversation history index and re-index it, then exit")
 	stat := flag.Bool("stat", false, "print index statistics and exit, without starting the MCP server")
 	showVersion := flag.Bool("version", false, "print the klodmem version and exit")
 	flag.Parse()
@@ -43,9 +46,13 @@ func run() error {
 		return nil
 	}
 
-	doMemory := *ingestAll || *ingestMemory
-	doHistory := *ingestAll || *ingestHistory
-	oneShot := *ingestAll || *ingestMemory || *ingestHistory || *stat
+	doResetMemory := *resetAll || *resetMemory
+	doResetHistory := *resetAll || *resetHistory
+	// A reset always re-indexes what it cleared, so the ingest flags below are
+	// implied: -reset is -reset.memory -reset.history plus a full re-scan.
+	doMemory := *ingestAll || *ingestMemory || doResetMemory
+	doHistory := *ingestAll || *ingestHistory || doResetHistory
+	oneShot := doMemory || doHistory || *stat
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -71,6 +78,28 @@ func run() error {
 	histIdx := historyindexer.New(cfg.MemoryRoot, s, log)
 
 	if oneShot {
+		if doResetMemory {
+			reports, err := s.ResetMemory(ctx)
+			if err != nil {
+				return err
+			}
+			logReset(log, reports)
+		}
+		if doResetHistory {
+			reports, err := s.ResetHistory(ctx)
+			if err != nil {
+				return err
+			}
+			logReset(log, reports)
+		}
+		if doResetMemory || doResetHistory {
+			// Compaction is best effort: the index is clear either way, and a
+			// VACUUM can lose the race for the write lock to another klodmem
+			// process (one runs per MCP client, all sharing this database).
+			if err := s.Vacuum(ctx); err != nil {
+				log.Warn("klodmem: could not compact the database after reset", "error", err)
+			}
+		}
 		if doMemory {
 			if err := idx.FullScan(ctx); err != nil {
 				return err
@@ -123,6 +152,14 @@ func run() error {
 
 	server := mcpserver.New(s, log, version)
 	return server.Run(ctx, &mcp.StdioTransport{})
+}
+
+// logReset reports what a reset cleared, one line per table, so a run that
+// finds nothing to clear is visibly different from one that drops rows.
+func logReset(log *slog.Logger, reports []store.ResetReport) {
+	for _, r := range reports {
+		log.Info("klodmem: index table cleared", "table", r.Table, "rows", r.Rows)
+	}
 }
 
 func parseLevel(level string) slog.Level {

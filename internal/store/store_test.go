@@ -123,6 +123,172 @@ func TestAllTranscriptPaths(t *testing.T) {
 	}
 }
 
+func TestResetMemoryClearsOnlyTheMemoryIndex(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	if err := s.UpsertFile(ctx, memoryfile.Memory{
+		Path: "/proj/memory/style.md", Project: "proj", Name: "style", Type: "feedback",
+		Description: "prefers table-driven tests", Content: "Use table-driven tests.", MTime: 100,
+	}); err != nil {
+		t.Fatalf("UpsertFile() error: %v", err)
+	}
+	msgs := []transcript.Message{{Project: "proj", SessionID: "s1", Role: "user", Text: "why is the build failing", Timestamp: "t1"}}
+	if err := s.InsertHistoryMessages(ctx, "/proj/s1.jsonl", "proj", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	reports, err := s.ResetMemory(ctx)
+	if err != nil {
+		t.Fatalf("ResetMemory() error: %v", err)
+	}
+	if len(reports) != 2 || reports[0].Table != "files" || reports[0].Rows != 1 {
+		t.Fatalf("ResetMemory() reports = %+v, want one cleared row in files and one in memory_fts", reports)
+	}
+
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.MemoryFiles != 0 {
+		t.Fatalf("Stats().MemoryFiles = %d after reset, want 0", stats.MemoryFiles)
+	}
+	if stats.HistoryMessages != 1 {
+		t.Fatalf("Stats().HistoryMessages = %d after a memory-only reset, want 1 (history must be untouched)", stats.HistoryMessages)
+	}
+
+	// The memory index has to be usable again, or a reset would be a one-way trip.
+	if err := s.UpsertFile(ctx, memoryfile.Memory{
+		Path: "/proj/memory/style.md", Project: "proj", Name: "style", Type: "feedback",
+		Description: "prefers table-driven tests", Content: "Use table-driven tests.", MTime: 100,
+	}); err != nil {
+		t.Fatalf("UpsertFile() (after reset) error: %v", err)
+	}
+	results, err := s.Search(ctx, SearchQuery{Query: "table-driven"})
+	if err != nil {
+		t.Fatalf("Search() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Search() after reset and re-index = %d results, want 1", len(results))
+	}
+}
+
+func TestResetHistoryClearsOnlyTheHistoryIndex(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	if err := s.UpsertFile(ctx, memoryfile.Memory{
+		Path: "/proj/memory/style.md", Project: "proj", Name: "style", Type: "feedback",
+		Description: "prefers table-driven tests", Content: "Use table-driven tests.", MTime: 100,
+	}); err != nil {
+		t.Fatalf("UpsertFile() error: %v", err)
+	}
+	msgs := []transcript.Message{{Project: "proj", SessionID: "s1", Role: "user", Text: "why is the build failing", Timestamp: "t1"}}
+	if err := s.InsertHistoryMessages(ctx, "/proj/s1.jsonl", "proj", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	reports, err := s.ResetHistory(ctx)
+	if err != nil {
+		t.Fatalf("ResetHistory() error: %v", err)
+	}
+	if len(reports) != 3 {
+		t.Fatalf("ResetHistory() reports = %+v, want transcript_files, history_fts and history_messages", reports)
+	}
+
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.HistoryMessages != 0 {
+		t.Fatalf("Stats().HistoryMessages = %d after reset, want 0", stats.HistoryMessages)
+	}
+	if stats.MemoryFiles != 1 {
+		t.Fatalf("Stats().MemoryFiles = %d after a history-only reset, want 1 (memory must be untouched)", stats.MemoryFiles)
+	}
+
+	// The offset is gone, so the file counts as unindexed...
+	if _, ok, err := s.TranscriptOffset(ctx, "/proj/s1.jsonl"); err != nil || ok {
+		t.Fatalf("TranscriptOffset() after reset = (ok=%v, err=%v), want the file to look unindexed", ok, err)
+	}
+	// ...and the messages have to be indexable again. If history_messages
+	// survived the reset, the insert below would be skipped as a duplicate and
+	// the re-index would silently index nothing.
+	if err := s.InsertHistoryMessages(ctx, "/proj/s1.jsonl", "proj", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() (after reset) error: %v", err)
+	}
+	results, err := s.SearchHistory(ctx, HistorySearchQuery{Query: "failing"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchHistory() after reset and re-index = %d results, want 1", len(results))
+	}
+}
+
+func TestResetOnEmptyStoreClearsNothing(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	for name, reset := range map[string]func(context.Context) ([]ResetReport, error){
+		"memory":  s.ResetMemory,
+		"history": s.ResetHistory,
+	} {
+		reports, err := reset(ctx)
+		if err != nil {
+			t.Fatalf("Reset(%s) on an empty store error: %v", name, err)
+		}
+		for _, r := range reports {
+			if r.Rows != 0 {
+				t.Fatalf("Reset(%s) cleared %d rows from an empty %s, want 0", name, r.Rows, r.Table)
+			}
+		}
+	}
+}
+
+// TestResetWithAnotherConnectionOpen covers the documented reason to clear
+// rows instead of deleting the database file: another klodmem process (one
+// runs per MCP client) has the same database open.
+func TestResetWithAnotherConnectionOpen(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "klodmem.db")
+
+	first, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open() (second connection) error: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	msgs := []transcript.Message{{Project: "proj", SessionID: "s1", Role: "user", Text: "why is the build failing", Timestamp: "t1"}}
+	if err := first.InsertHistoryMessages(ctx, "/proj/s1.jsonl", "proj", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	if _, err := second.ResetHistory(ctx); err != nil {
+		t.Fatalf("ResetHistory() with another connection open error: %v", err)
+	}
+	if err := second.Vacuum(ctx); err != nil {
+		t.Fatalf("Vacuum() with another connection open error: %v", err)
+	}
+
+	// The first connection must still work, and see the cleared index.
+	if _, ok, err := first.TranscriptOffset(ctx, "/proj/s1.jsonl"); err != nil || ok {
+		t.Fatalf("TranscriptOffset() after a reset from the other connection = (ok=%v, err=%v), want unindexed", ok, err)
+	}
+	if err := first.InsertHistoryMessages(ctx, "/proj/s1.jsonl", "proj", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() (after reset from the other connection) error: %v", err)
+	}
+	stats, err := first.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.HistoryMessages != 1 {
+		t.Fatalf("Stats().HistoryMessages = %d, want 1", stats.HistoryMessages)
+	}
+}
+
 func sameElements(got, want []string) bool {
 	if len(got) != len(want) {
 		return false

@@ -119,6 +119,39 @@ func TestFullScanSkipsUnchangedFiles(t *testing.T) {
 	}
 }
 
+// TestResetMemoryThenFullScanRebuildsTheIndex covers the memory side of the
+// reason -reset exists: it drops the file records, and the next scan puts them
+// back from the markdown, which klodmem only ever reads.
+func TestResetMemoryThenFullScanRebuildsTheIndex(t *testing.T) {
+	idx, s, root, ctx := newTestIndexer(t)
+	writeMemoryFile(t, root, "proj-a", "testing_style.md", sampleMemory)
+
+	if err := idx.FullScan(ctx); err != nil {
+		t.Fatalf("FullScan() error: %v", err)
+	}
+	if stats, err := s.Stats(ctx); err != nil || stats.MemoryFiles != 1 {
+		t.Fatalf("Stats().MemoryFiles before the reset = %d (err=%v), want 1", stats.MemoryFiles, err)
+	}
+
+	if _, err := s.ResetMemory(ctx); err != nil {
+		t.Fatalf("ResetMemory() error: %v", err)
+	}
+	if stats, err := s.Stats(ctx); err != nil || stats.MemoryFiles != 0 {
+		t.Fatalf("Stats().MemoryFiles after the reset = %d (err=%v), want 0", stats.MemoryFiles, err)
+	}
+
+	if err := idx.FullScan(ctx); err != nil {
+		t.Fatalf("FullScan() (after reset) error: %v", err)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.MemoryFiles != 1 {
+		t.Fatalf("Stats().MemoryFiles after reset and re-index = %d, want 1", stats.MemoryFiles)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

@@ -307,6 +307,72 @@ func TestConcurrentFullScansIndexEachMessageOnce(t *testing.T) {
 	}
 }
 
+// TestResetHistoryThenFullScanClearsPreexistingDuplicates covers the upgrade
+// path -reset exists for: an index written by a version older than the
+// duplicate fix holds the same message several times, and a reset plus a scan
+// has to leave exactly one row per message.
+func TestResetHistoryThenFullScanClearsPreexistingDuplicates(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "klodmem.db")
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	idx := New(root, s, nil)
+
+	path := writeTranscript(t, root, "proj-a", "s1",
+		userLine("s1", "first question about caching")+assistantLine("s1", "use an lru cache keyed by the request path"))
+	if err := idx.FullScan(ctx); err != nil {
+		t.Fatalf("FullScan() error: %v", err)
+	}
+
+	// Write the first message a second time, straight into the FTS table the
+	// way a pre-fix binary did, bypassing the identity table.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.ExecContext(ctx, `
+		INSERT INTO history_fts (path, session_id, timestamp, project, role, text)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, path, "s1", "t", "proj-a", "user", "first question about caching"); err != nil {
+		t.Fatalf("seeding a duplicate row: %v", err)
+	}
+
+	before, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if before.HistoryMessages != 3 {
+		t.Fatalf("Stats().HistoryMessages = %d before the reset, want 3 (two messages plus the seeded duplicate)", before.HistoryMessages)
+	}
+
+	if _, err := s.ResetHistory(ctx); err != nil {
+		t.Fatalf("ResetHistory() error: %v", err)
+	}
+	if err := idx.FullScan(ctx); err != nil {
+		t.Fatalf("FullScan() (after reset) error: %v", err)
+	}
+
+	after, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if after.HistoryMessages != 2 {
+		t.Fatalf("Stats().HistoryMessages = %d after reset and re-index, want 2", after.HistoryMessages)
+	}
+	results, err := s.SearchHistory(ctx, store.HistorySearchQuery{Query: "caching"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("SearchHistory() after reset and re-index = %d results, want 2", len(results))
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
