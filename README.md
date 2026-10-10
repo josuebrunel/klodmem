@@ -4,6 +4,8 @@
 
 Claude forgot what you two solved last week? klodmem gives Claude Code full-text search over its auto-memory and your raw conversation history, across every project. Local-first, one Go binary, no cloud.
 
+> **Cross-project, cross-agent.** Register klodmem once and any MCP-capable agent gets Claude's memory and raw conversation history, from **every** project, not just the one it's working in.
+
 ## Quick start
 
 **1. Install** (no Go needed). Swap the suffix for your platform: `linux-amd64`, `linux-arm64`, `darwin-amd64`, or `darwin-arm64`.
@@ -34,11 +36,15 @@ claude mcp add --scope user klodmem -- klodmem
 
 That's it. No server, no API key, no config. To check the connection, run `claude mcp get klodmem`.
 
+Using a different agent? Add klodmem to its MCP config as a stdio server with the command `klodmem`, and it gets the same two tools.
+
 ## What you get
 
 Claude Code can only find its memories through one-line entries in `MEMORY.md`, matched by exact keyword, and each project's memories are invisible from every other project. klodmem fixes that:
 
-- **Searches full memory content, in every project.** Exposed as the `search_memory` tool.
+- **Cross-project.** One index covers every project under `~/.claude/projects`, so what you solved in one repo is findable from any other.
+- **Cross-agent.** It's a standard MCP server. Once an agent has added it, that agent can read Claude's memory and raw history through the tools below.
+- **Searches full memory content.** Exposed as the `search_memory` tool.
 - **Searches raw conversation history too.** Past discussions that never made it into memory are findable via `search_history`.
 - **Live.** File watchers keep new memories and conversation turns searchable while a session is open.
 - **Local and private.** No network calls. klodmem only reads your files.
