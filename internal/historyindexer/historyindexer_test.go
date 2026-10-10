@@ -2,10 +2,14 @@ package historyindexer
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/josuebrunel/klodmem/internal/store"
 )
@@ -164,6 +168,142 @@ func TestFullScanPrunesDeletedTranscripts(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Fatalf("SearchHistory() after prune = %d results, want 0", len(results))
+	}
+}
+
+// TestFullScanAfterTranscriptRewriteDoesNotDuplicateMessages is a regression
+// test for the rewrite path: a transcript rewritten shorter (Claude Code
+// rewrites session files when it compacts them) is re-read from byte 0, and
+// that used to re-index every message in the file on top of the rows from the
+// previous pass.
+func TestFullScanAfterTranscriptRewriteDoesNotDuplicateMessages(t *testing.T) {
+	idx, s, root, ctx := newTestIndexer(t)
+	kept := userLine("s1", "the deploy runs through the cli")
+	gone := assistantLine("s1", "this answer is about to be compacted away")
+	path := writeTranscript(t, root, "proj-a", "s1", kept+gone)
+
+	if err := idx.FullScan(ctx); err != nil {
+		t.Fatalf("FullScan() error: %v", err)
+	}
+
+	// Rewrite the transcript shorter, dropping the last message.
+	if err := os.WriteFile(path, []byte(kept), 0o644); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := idx.FullScan(ctx); err != nil {
+		t.Fatalf("FullScan() (after rewrite) error: %v", err)
+	}
+
+	results, err := s.SearchHistory(ctx, store.HistorySearchQuery{Query: "deploy"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchHistory() = %d results, want 1 (the kept message must be indexed once)", len(results))
+	}
+
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.HistoryMessages != 1 {
+		t.Fatalf("Stats().HistoryMessages = %d, want 1 (the dropped message must be gone, the kept one not duplicated)", stats.HistoryMessages)
+	}
+}
+
+// TestRescanAfterLostOffsetDoesNotDuplicateMessages is a regression test for
+// the offset race: two klodmem processes can both read a transcript's offset
+// before either commits, and both then index the same span. Clearing the
+// stored offset (what the second, stale reader effectively sees) must not
+// duplicate messages that are already indexed.
+func TestRescanAfterLostOffsetDoesNotDuplicateMessages(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "klodmem.db")
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	idx := New(root, s, nil)
+
+	path := writeTranscript(t, root, "proj-a", "s1",
+		userLine("s1", "first question about caching")+assistantLine("s1", "use an lru cache keyed by the request path"))
+	if err := idx.FullScan(ctx); err != nil {
+		t.Fatalf("FullScan() error: %v", err)
+	}
+
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.ExecContext(ctx, `DELETE FROM transcript_files WHERE path = ?`, path); err != nil {
+		t.Fatalf("clearing the stored offset: %v", err)
+	}
+
+	if err := idx.FullScan(ctx); err != nil {
+		t.Fatalf("FullScan() (after losing the offset) error: %v", err)
+	}
+
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.HistoryMessages != 2 {
+		t.Fatalf("Stats().HistoryMessages = %d, want 2 (re-reading an indexed span must not duplicate it)", stats.HistoryMessages)
+	}
+}
+
+// TestConcurrentFullScansIndexEachMessageOnce covers the same race from the
+// other side: two klodmem processes (each with its own connection) scanning
+// the same transcript at the same time must leave exactly one row per message,
+// whichever of them wins.
+func TestConcurrentFullScansIndexEachMessageOnce(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "klodmem.db")
+
+	open := func() (*store.Store, *Indexer) {
+		s, err := store.Open(ctx, dbPath)
+		if err != nil {
+			t.Fatalf("store.Open() error: %v", err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s, New(root, s, nil)
+	}
+	s1, idx1 := open()
+	_, idx2 := open()
+	t.Cleanup(func() { _ = idx2.store.Close() })
+
+	writeTranscript(t, root, "proj-a", "s1",
+		userLine("s1", "first question about caching")+
+			assistantLine("s1", "use an lru cache keyed by the request path")+
+			userLine("s1", "second question about caching"))
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, idx := range []*Indexer{idx1, idx2} {
+		wg.Add(1)
+		go func(idx *Indexer) {
+			defer wg.Done()
+			errs <- idx.FullScan(ctx)
+		}(idx)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent FullScan() error: %v", err)
+		}
+	}
+
+	stats, err := s1.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.HistoryMessages != 3 {
+		t.Fatalf("Stats().HistoryMessages = %d, want 3 (one per message, not one per process)", stats.HistoryMessages)
 	}
 }
 

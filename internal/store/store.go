@@ -4,7 +4,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +53,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(
 	role,
 	text,
 	tokenize = 'porter'
+);
+
+-- history_messages holds one row per indexed message, keyed by the message's
+-- identity within its transcript. It exists so that indexing the same message
+-- twice is a no-op: history_fts is an FTS5 table and can't carry a unique
+-- constraint of its own.
+CREATE TABLE IF NOT EXISTS history_messages (
+	path      TEXT NOT NULL,
+	timestamp TEXT NOT NULL,
+	role      TEXT NOT NULL,
+	text_hash TEXT NOT NULL,
+	PRIMARY KEY (path, timestamp, role, text_hash)
 );
 `
 
@@ -272,6 +286,10 @@ func (s *Store) TranscriptOffset(ctx context.Context, path string) (int64, bool,
 // InsertHistoryMessages records that path has been parsed up to newOffset
 // and inserts msgs (the messages found in the newly-parsed span), all in one
 // transaction. msgs may be empty (e.g. a span with no authored text).
+//
+// Messages already indexed for path are skipped, so re-parsing a span that
+// was indexed before (a re-scan of a rewritten transcript, or a second
+// klodmem process indexing the same span at the same time) adds nothing.
 func (s *Store) InsertHistoryMessages(ctx context.Context, path, project, sessionID string, newOffset, mtime int64, msgs []transcript.Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -288,11 +306,8 @@ func (s *Store) InsertHistoryMessages(ctx context.Context, path, project, sessio
 	}
 
 	for _, m := range msgs {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO history_fts (path, session_id, timestamp, project, role, text) VALUES (?, ?, ?, ?, ?, ?)`,
-			path, m.SessionID, m.Timestamp, m.Project, m.Role, m.Text,
-		); err != nil {
-			return fmt.Errorf("store: insert history message for %s: %w", path, err)
+		if err := insertHistoryMessage(ctx, tx, path, m); err != nil {
+			return err
 		}
 	}
 
@@ -300,6 +315,43 @@ func (s *Store) InsertHistoryMessages(ctx context.Context, path, project, sessio
 		return fmt.Errorf("store: commit history insert for %s: %w", path, err)
 	}
 	return nil
+}
+
+// insertHistoryMessage indexes one message, skipping it if the message is
+// already indexed for path. The history_messages row doubles as the claim:
+// its primary key is the message's identity, so a duplicate insert affects
+// no rows and the FTS row is never written.
+func insertHistoryMessage(ctx context.Context, tx *sql.Tx, path string, m transcript.Message) error {
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO history_messages (path, timestamp, role, text_hash)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT DO NOTHING
+	`, path, m.Timestamp, m.Role, textHash(m.Text))
+	if err != nil {
+		return fmt.Errorf("store: claim history message for %s: %w", path, err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: check history message claim for %s: %w", path, err)
+	}
+	if inserted == 0 {
+		return nil // already indexed
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO history_fts (path, session_id, timestamp, project, role, text) VALUES (?, ?, ?, ?, ?, ?)`,
+		path, m.SessionID, m.Timestamp, m.Project, m.Role, m.Text,
+	); err != nil {
+		return fmt.Errorf("store: insert history message for %s: %w", path, err)
+	}
+	return nil
+}
+
+// textHash identifies a message's text within history_messages. Truncated
+// message text is hashed as stored, so it also matches on re-reads.
+func textHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 // DeleteTranscript removes all indexed history for a transcript file, e.g.
@@ -316,6 +368,9 @@ func (s *Store) DeleteTranscript(ctx context.Context, path string) error {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM history_fts WHERE path = ?`, path); err != nil {
 		return fmt.Errorf("store: delete history rows for %s: %w", path, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM history_messages WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("store: delete history message keys for %s: %w", path, err)
 	}
 
 	if err := tx.Commit(); err != nil {

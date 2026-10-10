@@ -327,6 +327,68 @@ func TestInsertHistoryMessagesAndSearch(t *testing.T) {
 	}
 }
 
+func TestInsertHistoryMessagesIsIdempotent(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	msgs := []transcript.Message{
+		{Project: "proj-a", SessionID: "s1", Role: "user", Text: "why is the build failing on CI", Timestamp: "t1"},
+		{Project: "proj-a", SessionID: "s1", Role: "assistant", Text: "the build fails because of a missing dependency", Timestamp: "t2"},
+	}
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 1234, 999, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+
+	// The same span parsed again — a rewritten transcript re-read from 0, or a
+	// second klodmem process that read the same offset before this one
+	// committed — must not index these messages a second time.
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 4321, 1000, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() (same span again) error: %v", err)
+	}
+
+	results, err := s.SearchHistory(ctx, HistorySearchQuery{Query: "dependency"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchHistory() = %d results, want 1 (a duplicate insert must be a no-op)", len(results))
+	}
+
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.HistoryMessages != len(msgs) {
+		t.Fatalf("Stats().HistoryMessages = %d, want %d", stats.HistoryMessages, len(msgs))
+	}
+}
+
+func TestDeletedTranscriptCanBeIndexedAgain(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	msgs := []transcript.Message{{Project: "proj-a", SessionID: "s1", Role: "user", Text: "hello world", Timestamp: "t1"}}
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() error: %v", err)
+	}
+	if err := s.DeleteTranscript(ctx, "/proj-a/s1.jsonl"); err != nil {
+		t.Fatalf("DeleteTranscript() error: %v", err)
+	}
+
+	// Deleting has to clear the message keys, not just the FTS rows: a
+	// transcript that comes back (or is re-indexed after a rewrite) must be
+	// indexable again.
+	if err := s.InsertHistoryMessages(ctx, "/proj-a/s1.jsonl", "proj-a", "s1", 100, 1, msgs); err != nil {
+		t.Fatalf("InsertHistoryMessages() (after delete) error: %v", err)
+	}
+
+	results, err := s.SearchHistory(ctx, HistorySearchQuery{Query: "hello"})
+	if err != nil {
+		t.Fatalf("SearchHistory() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchHistory() after re-index = %d results, want 1", len(results))
+	}
+}
+
 func TestSearchHistoryFilters(t *testing.T) {
 	s, ctx := openTestStore(t)
 

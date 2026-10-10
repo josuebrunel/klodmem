@@ -91,7 +91,12 @@ func (idx *Indexer) ingestPath(ctx context.Context, path string) (int, error) {
 		return 0, err
 	}
 	if offset > info.Size() {
-		// File was truncated or replaced (e.g. a rare rewrite) — start over.
+		// File was truncated or rewritten (Claude Code rewrites session files
+		// when it compacts them) — drop what's indexed for it and re-read from
+		// the start, so messages that no longer exist in the file don't linger.
+		if err := idx.store.DeleteTranscript(ctx, path); err != nil {
+			return 0, err
+		}
 		offset = 0
 	}
 	if offset == info.Size() {
