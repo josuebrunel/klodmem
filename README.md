@@ -36,7 +36,25 @@ claude mcp add --scope user klodmem -- klodmem
 
 That's it. No server, no API key, no config. To check the connection, run `claude mcp get klodmem`.
 
-Using a different agent? Add klodmem to its MCP config as a stdio server with the command `klodmem`, and it gets the same two tools.
+### Other agents
+
+Any MCP-capable agent can use klodmem. Add it as a stdio server with the command `klodmem`, and it gets the same two tools.
+
+**Hermes**
+
+```sh
+hermes mcp add klodmem --command klodmem
+```
+
+**Opencode**, in `opencode.jsonc`:
+
+```jsonc
+{
+  "mcp": {
+    "klodmem": { "type": "local", "command": ["klodmem"] }
+  }
+}
+```
 
 ## What you get
 
