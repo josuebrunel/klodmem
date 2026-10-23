@@ -6,9 +6,30 @@ Claude forgot what you two solved last week? klodmem gives Claude Code full-text
 
 > **Cross-project, cross-agent.** Register klodmem once and any MCP-capable agent gets Claude's memory, conversation history, prompts, and plans, from **every** project, not just the one it's working in.
 
+## Contents
+
+- [Quick start](#quick-start)
+  - [Install](#install)
+  - [Register klodmem](#register-klodmem)
+  - [Try it](#try-it)
+  - [Other agents](#other-agents)
+- [What you get](#what-you-get)
+- [Install options](#install-options)
+- [How it works](#how-it-works)
+- [CLI reference](#cli-reference)
+- [Configuration](#configuration)
+- [MCP tools](#mcp-tools)
+  - [`search_memory`](#search_memory)
+  - [`search_history`](#search_history)
+  - [`search_prompts`](#search_prompts)
+  - [`search_plans`](#search_plans)
+- [Contributing](#contributing)
+
 ## Quick start
 
-**1. Install** (no Go needed). Swap the suffix for your platform: `linux-amd64`, `linux-arm64`, `darwin-amd64`, or `darwin-arm64`.
+### Install
+
+No Go needed. Swap the suffix for your platform: `linux-amd64`, `linux-arm64`, `darwin-amd64`, or `darwin-arm64`.
 
 ```sh
 curl -L -o klodmem https://github.com/josuebrunel/klodmem/releases/latest/download/klodmem-darwin-arm64
@@ -24,13 +45,17 @@ Have Go 1.25+? You can do this instead:
 go install github.com/josuebrunel/klodmem/cmd/klodmem@latest
 ```
 
-**2. Register it once**, so it works in every project:
+### Register klodmem
+
+Register it once, so it works in every project:
 
 ```sh
 claude mcp add --scope user klodmem -- klodmem
 ```
 
-**3. Restart Claude Code and ask:**
+### Try it
+
+Restart Claude Code and ask:
 
 > *"Have I debugged this `connection refused` error before?"*
 
@@ -58,14 +83,21 @@ hermes mcp add klodmem --command klodmem
 
 ## What you get
 
-Claude Code can only find its memories through one-line entries in `MEMORY.md`, matched by exact keyword, and each project's memories are invisible from every other project. Prompts and plans are global but only surface in the picker or in the moment. klodmem fixes that:
+Claude Code can only find its memories through one-line entries in `MEMORY.md`, matched by exact keyword, and each project's memories are invisible from every other project. Prompts and plans are global but only surface in the picker or in the moment. klodmem fixes that.
+
+Four sources, four tools:
+
+| Source | Tool | Finds |
+|--------|------|-------|
+| Auto-memory (`~/.claude/projects/*/memory/*.md`) | `search_memory` | Notes Claude decided to save |
+| Session transcripts (`*/<session-id>.jsonl`) | `search_history` | Past debugging and back-and-forth |
+| Prompt history (`~/.claude/history.jsonl`) | `search_prompts` | What you asked, with time and session |
+| Plan Mode plans (`~/.claude/plans/*.md`) | `search_plans` | Planning documents |
+
+Why it's useful:
 
 - **Cross-project.** One index covers every project under `~/.claude/projects`, so what you solved in one repo is findable from any other.
 - **Cross-agent.** It's a standard MCP server. Once an agent has added it, that agent can read Claude's memory, conversation history, prompts, and plans through the tools below.
-- **Searches full memory content.** Exposed as the `search_memory` tool.
-- **Searches raw conversation history too.** Past discussions that never made it into memory are findable via `search_history`.
-- **Searches the prompts you typed.** Claude Code's global prompt history is indexed as `search_prompts`, with the project and session id to jump back in.
-- **Searches Plan Mode plans.** The planning documents from plan mode are indexed as `search_plans`.
 - **Live.** File watchers keep new memories, conversation turns, prompts, and plans searchable while a session is open.
 - **Local and private.** No network calls. klodmem only reads your files.
 - **Safe to try.** Your markdown stays the source of truth and the index is disposable. `klodmem -reset` rebuilds it any time.
