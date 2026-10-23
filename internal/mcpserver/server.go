@@ -1,5 +1,5 @@
-// Package mcpserver exposes the memory index to Claude Code as an MCP tool
-// over stdio.
+// Package mcpserver exposes the memory, history, prompt, and plan indexes to
+// Claude Code as MCP tools over stdio.
 package mcpserver
 
 import (
@@ -29,9 +29,23 @@ type HistorySearchInput struct {
 	Limit   int    `json:"limit,omitempty" jsonschema:"maximum number of results to return (default 10)"`
 }
 
-// New builds an MCP server exposing search_memory and search_history, both
-// backed by s. version is reported to clients as the server implementation
-// version; an empty string falls back to "dev".
+// PromptSearchInput is the search_prompts tool's input schema.
+type PromptSearchInput struct {
+	Query   string `json:"query" jsonschema:"the search terms to look for across indexed prompts"`
+	Project string `json:"project,omitempty" jsonschema:"optional project slug to restrict results to"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"maximum number of results to return (default 10)"`
+}
+
+// PlanSearchInput is the search_plans tool's input schema.
+type PlanSearchInput struct {
+	Query string `json:"query" jsonschema:"the search terms to look for across indexed Plan Mode plans"`
+	Limit int    `json:"limit,omitempty" jsonschema:"maximum number of results to return (default 10)"`
+}
+
+// New builds an MCP server exposing search_memory, search_history,
+// search_prompts and search_plans, all backed by s. version is reported to
+// clients as the server implementation version; an empty string falls back to
+// "dev".
 func New(s *store.Store, log *slog.Logger, version string) *mcp.Server {
 	if log == nil {
 		log = slog.Default()
@@ -54,6 +68,20 @@ func New(s *store.Store, log *slog.Logger, version string) *mcp.Server {
 		Description: "Full-text search over past Claude Code conversation transcripts (user and assistant turns) across all projects. Complements search_memory: this searches raw conversation history, not curated memory.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in HistorySearchInput) (*mcp.CallToolResult, any, error) {
 		return handleSearchHistory(ctx, s, log, in)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "search_prompts",
+		Description: "Full-text search over the prompts you have typed into Claude Code across every project (Claude Code's global prompt history), including pasted content. Returns the matching prompt, timestamp, project, and session id so the full conversation can be opened.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in PromptSearchInput) (*mcp.CallToolResult, any, error) {
+		return handleSearchPrompts(ctx, s, log, in)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "search_plans",
+		Description: "Full-text search over Claude Code Plan Mode plans (~/.claude/plans/*.md), the planning documents written during plan mode across all projects.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in PlanSearchInput) (*mcp.CallToolResult, any, error) {
+		return handleSearchPlans(ctx, s, log, in)
 	})
 
 	return server
@@ -147,6 +175,93 @@ func formatHistoryResults(results []store.HistorySearchResult) string {
 		}
 		out += fmt.Sprintf("[%s/%s] %s\n%s\nsession: %s\nfile: %s",
 			r.Project, r.Role, r.Timestamp, r.Snippet, r.SessionID, r.Path)
+	}
+	return out
+}
+
+func handleSearchPrompts(ctx context.Context, s *store.Store, log *slog.Logger, in PromptSearchInput) (*mcp.CallToolResult, any, error) {
+	if strings.TrimSpace(in.Query) == "" {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "query must not be empty"}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	results, err := s.SearchPrompts(ctx, store.PromptSearchQuery{
+		Query:   in.Query,
+		Project: in.Project,
+		Limit:   in.Limit,
+	})
+	if err != nil {
+		log.Error("mcpserver: prompt search failed", "query", in.Query, "error", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("search failed: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	if len(results) == 0 {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "no matching prompts found"}},
+		}, nil, nil
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: formatPromptResults(results)}},
+	}, nil, nil
+}
+
+func formatPromptResults(results []store.PromptSearchResult) string {
+	out := ""
+	for i, r := range results {
+		if i > 0 {
+			out += "\n\n"
+		}
+		out += fmt.Sprintf("[%s] %s\n%s\nsession: %s\nfile: %s",
+			r.Project, r.Timestamp, r.Snippet, r.SessionID, r.Path)
+	}
+	return out
+}
+
+func handleSearchPlans(ctx context.Context, s *store.Store, log *slog.Logger, in PlanSearchInput) (*mcp.CallToolResult, any, error) {
+	if strings.TrimSpace(in.Query) == "" {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "query must not be empty"}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	results, err := s.SearchPlans(ctx, store.PlanSearchQuery{
+		Query: in.Query,
+		Limit: in.Limit,
+	})
+	if err != nil {
+		log.Error("mcpserver: plan search failed", "query", in.Query, "error", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("search failed: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	if len(results) == 0 {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "no matching plans found"}},
+		}, nil, nil
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: formatPlanResults(results)}},
+	}, nil, nil
+}
+
+func formatPlanResults(results []store.PlanSearchResult) string {
+	out := ""
+	for i, r := range results {
+		if i > 0 {
+			out += "\n\n"
+		}
+		out += fmt.Sprintf("%s (%s)\n%s\nfile: %s",
+			r.Name, r.Description, r.Snippet, r.Path)
 	}
 	return out
 }

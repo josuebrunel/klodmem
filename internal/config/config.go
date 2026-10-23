@@ -11,9 +11,11 @@ import (
 
 // Config holds klodmem's runtime settings.
 type Config struct {
-	MemoryRoot string `env:"KLODMEM_MEMORY_ROOT" default:"~/.claude/projects"`
-	DBPath     string `env:"KLODMEM_DB_PATH"     default:"~/.claude/klodmem/klodmem.db"`
-	LogLevel   string `env:"KLODMEM_LOG_LEVEL"   default:"info"`
+	MemoryRoot  string `env:"KLODMEM_MEMORY_ROOT"  default:"~/.claude/projects"`
+	PlansRoot   string `env:"KLODMEM_PLANS_ROOT"   default:"~/.claude/plans"`
+	HistoryPath string `env:"KLODMEM_HISTORY_PATH" default:"~/.claude/history.jsonl"`
+	DBPath      string `env:"KLODMEM_DB_PATH"      default:"~/.claude/klodmem/klodmem.db"`
+	LogLevel    string `env:"KLODMEM_LOG_LEVEL"    default:"info"`
 }
 
 // Load reads Config from the environment and expands leading "~" in path fields.
@@ -28,6 +30,18 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: expand memory root: %w", err)
 	}
 	cfg.MemoryRoot = memoryRoot
+
+	plansRoot, err := expandHome(cfg.PlansRoot)
+	if err != nil {
+		return Config{}, fmt.Errorf("config: expand plans root: %w", err)
+	}
+	cfg.PlansRoot = plansRoot
+
+	historyPath, err := expandHome(cfg.HistoryPath)
+	if err != nil {
+		return Config{}, fmt.Errorf("config: expand history path: %w", err)
+	}
+	cfg.HistoryPath = historyPath
 
 	dbPath, err := expandHome(cfg.DBPath)
 	if err != nil {

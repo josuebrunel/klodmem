@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/josuebrunel/klodmem/actions/workflows/ci.yml/badge.svg)](https://github.com/josuebrunel/klodmem/actions/workflows/ci.yml)
 
-Claude forgot what you two solved last week? klodmem gives Claude Code full-text search over its auto-memory and your raw conversation history, across every project. Local-first, one Go binary, no cloud.
+Claude forgot what you two solved last week? klodmem gives Claude Code full-text search over its auto-memory, your raw conversation history, the prompts you typed, and your Plan Mode plans, across every project. Local-first, one Go binary, no cloud.
 
-> **Cross-project, cross-agent.** Register klodmem once and any MCP-capable agent gets Claude's memory and raw conversation history, from **every** project, not just the one it's working in.
+> **Cross-project, cross-agent.** Register klodmem once and any MCP-capable agent gets Claude's memory, conversation history, prompts, and plans, from **every** project, not just the one it's working in.
 
 ## Quick start
 
@@ -38,7 +38,7 @@ That's it. No server, no API key, no config. To check the connection, run `claud
 
 ### Other agents
 
-Any MCP-capable agent can use klodmem. Add it as a stdio server with the command `klodmem`, and it gets the same two tools.
+Any MCP-capable agent can use klodmem. Add it as a stdio server with the command `klodmem`, and it gets the same four tools.
 
 **Hermes**
 
@@ -58,13 +58,15 @@ hermes mcp add klodmem --command klodmem
 
 ## What you get
 
-Claude Code can only find its memories through one-line entries in `MEMORY.md`, matched by exact keyword, and each project's memories are invisible from every other project. klodmem fixes that:
+Claude Code can only find its memories through one-line entries in `MEMORY.md`, matched by exact keyword, and each project's memories are invisible from every other project. Prompts and plans are global but only surface in the picker or in the moment. klodmem fixes that:
 
 - **Cross-project.** One index covers every project under `~/.claude/projects`, so what you solved in one repo is findable from any other.
-- **Cross-agent.** It's a standard MCP server. Once an agent has added it, that agent can read Claude's memory and raw history through the tools below.
+- **Cross-agent.** It's a standard MCP server. Once an agent has added it, that agent can read Claude's memory, conversation history, prompts, and plans through the tools below.
 - **Searches full memory content.** Exposed as the `search_memory` tool.
 - **Searches raw conversation history too.** Past discussions that never made it into memory are findable via `search_history`.
-- **Live.** File watchers keep new memories and conversation turns searchable while a session is open.
+- **Searches the prompts you typed.** Claude Code's global prompt history is indexed as `search_prompts`, with the project and session id to jump back in.
+- **Searches Plan Mode plans.** The planning documents from plan mode are indexed as `search_plans`.
+- **Live.** File watchers keep new memories, conversation turns, prompts, and plans searchable while a session is open.
 - **Local and private.** No network calls. klodmem only reads your files.
 - **Safe to try.** Your markdown stays the source of truth and the index is disposable. `klodmem -reset` rebuilds it any time.
 
@@ -74,6 +76,8 @@ Try these in any project:
 |---|---|
 | *"Have I debugged this `connection refused` error before?"* | Calls `search_history`, finds the fix from a different project three weeks ago |
 | *"Search my memories for docker-compose port conflicts."* | Calls `search_memory`, finds the note even if it's filed under "compose mapping" |
+| *"Which time did I ask about migrating the billing schema?"* | Calls `search_prompts`, finds the prompt and the session to resume |
+| *"What was the plan for the auth refactor?"* | Calls `search_plans`, finds the Plan Mode document |
 
 ## Install options
 
@@ -109,8 +113,8 @@ Then point MCP at the binary: `claude mcp add --scope user klodmem -- /path/to/k
 
 ## How it works
 
-- On startup klodmem scans `~/.claude/projects/*/memory/*.md` (skipping each `MEMORY.md` index) and every `~/.claude/projects/*/<session-id>.jsonl` transcript, then indexes them into SQLite FTS5.
-- Transcripts are read incrementally: only newly appended lines on each scan. Both keep being watched while the MCP session is open.
+- On startup klodmem scans `~/.claude/projects/*/memory/*.md` (skipping each `MEMORY.md` index), every `~/.claude/projects/*/<session-id>.jsonl` transcript, the global prompt history at `~/.claude/history.jsonl`, and every `~/.claude/plans/*.md`, then indexes them into SQLite FTS5.
+- Transcripts and the prompt history are read incrementally: only newly appended lines on each scan. All four sources keep being watched while the MCP session is open.
 - The index lives at `~/.claude/klodmem/klodmem.db` and is disposable. klodmem rebuilds it from your files.
 
 ## CLI reference
@@ -120,21 +124,25 @@ Running `klodmem` with no flags starts the MCP server, which is the normal way t
 | Command                   | Does what                                                      |
 |---------------------------|----------------------------------------------------------------|
 | `klodmem`                 | Start the MCP server (scan then watch, with live search)       |
-| `klodmem -ingest`         | Index memory and history once, then exit                       |
+| `klodmem -ingest`         | Index every source once, then exit                             |
 | `klodmem -ingest.memory`  | Index memory files only, then exit                             |
 | `klodmem -ingest.history` | Index conversation history only, then exit                     |
-| `klodmem -reset`          | Truncate the index and re-index memory and history, then exit  |
+| `klodmem -ingest.prompts` | Index the global prompt history only, then exit                |
+| `klodmem -ingest.plans`   | Index Plan Mode plans only, then exit                          |
+| `klodmem -reset`          | Truncate the index and re-index every source, then exit        |
 | `klodmem -reset.memory`   | Truncate the memory index and re-index it, then exit           |
 | `klodmem -reset.history`  | Truncate the history index and re-index it, then exit          |
+| `klodmem -reset.prompts`  | Truncate the prompt history index and re-index it, then exit   |
+| `klodmem -reset.plans`    | Truncate the plan index and re-index it, then exit             |
 | `klodmem -stat`           | Print index statistics and exit, no scanning                   |
 | `klodmem -version`        | Print the klodmem version and exit                             |
 
 **`-ingest`** is handy for warming the index right after installing, or running from cron independent of any Claude Code session.
 
-**`-reset`** starts the index over and never touches your files. Reach for it when the index looks wrong, an older version left it messy, or the database has grown past what your transcripts justify.
+**`-reset`** starts the index over and never touches your files. Reach for it when the index looks wrong, an older version left it messy, or the database has grown past what your files justify.
 
 - It clears rows instead of deleting the database file, so it's safe while other klodmem processes have the database open. They re-read from the start on their next scan.
-- `-reset` equals `-reset.memory -reset.history`, and both imply the matching `-ingest` flags.
+- `-reset` equals `-reset.memory -reset.history -reset.prompts -reset.plans`, and all imply the matching `-ingest` flags.
 - Deleting the file by hand also works, but only while no MCP client is using it.
 
 **`-stat`** prints what's currently indexed. Combine it with another flag to act then report, e.g. `klodmem -reset -stat` or `klodmem -ingest -stat`.
@@ -148,6 +156,14 @@ klodmem index stats
 
 memory
   files: 1
+
+plans
+  files: 24
+
+prompts
+  prompts: 2654
+  sessions: 312
+  projects: 22
 
 history
   messages: 6398 (assistant: 5402, user: 996)
@@ -167,11 +183,13 @@ by project
 
 All settings are optional environment variables:
 
-| Variable              | Default                        | Meaning                                    |
-|-----------------------|--------------------------------|--------------------------------------------|
-| `KLODMEM_MEMORY_ROOT` | `~/.claude/projects`           | Root directory to scan for `*/memory/*.md` |
-| `KLODMEM_DB_PATH`     | `~/.claude/klodmem/klodmem.db` | SQLite index file location                 |
-| `KLODMEM_LOG_LEVEL`   | `info`                         | `debug`, `info`, `warn`, or `error`        |
+| Variable               | Default                        | Meaning                                    |
+|------------------------|--------------------------------|--------------------------------------------|
+| `KLODMEM_MEMORY_ROOT`  | `~/.claude/projects`           | Root directory to scan for `*/memory/*.md` and session transcripts |
+| `KLODMEM_PLANS_ROOT`   | `~/.claude/plans`              | Directory to scan for Plan Mode `*.md`     |
+| `KLODMEM_HISTORY_PATH` | `~/.claude/history.jsonl`      | Global prompt history file                 |
+| `KLODMEM_DB_PATH`      | `~/.claude/klodmem/klodmem.db` | SQLite index file location                 |
+| `KLODMEM_LOG_LEVEL`    | `info`                         | `debug`, `info`, `warn`, or `error`        |
 
 Pass them via `-e` when registering:
 
@@ -180,6 +198,8 @@ claude mcp add --scope user klodmem -e KLODMEM_LOG_LEVEL=debug -- klodmem
 ```
 
 ## MCP tools
+
+klodmem exposes four search tools, one per source. All are full-text, local, and cross-project (plans are global, so they have no project filter).
 
 ### `search_memory`
 
@@ -212,6 +232,29 @@ Good to know:
 - **Rawer content.** Only the authored text of user and assistant turns is extracted, never tool input/output, file contents, thinking blocks, or images.
 - **A bigger index.** Transcripts are much larger than memory files. The first scan has a one-time cost (a few seconds per few hundred MB), then it's incremental.
 - **No subagent transcripts.** Only each session's own top-level transcript is indexed.
+
+### `search_prompts`
+
+Full-text search over Claude Code's global prompt history (`~/.claude/history.jsonl`): the prompts you typed, across every project, including pasted content. Unlike `search_history`, this is not limited to sessions whose transcript still exists.
+
+| Field     | Type   | Required | Description                         |
+|-----------|--------|----------|-------------------------------------|
+| `query`   | string | yes      | Search terms                        |
+| `project` | string | no       | Restrict to one project (slug form) |
+| `limit`   | int    | no       | Max results (default 10)            |
+
+Each result includes the project, timestamp, a snippet, the session ID, and the history file path.
+
+### `search_plans`
+
+Full-text search over Claude Code's Plan Mode plans (`~/.claude/plans/*.md`). Plans are global, so there is no project filter.
+
+| Field   | Type   | Required | Description              |
+|---------|--------|----------|--------------------------|
+| `query` | string | yes      | Search terms             |
+| `limit` | int    | no       | Max results (default 10) |
+
+Each result includes the plan's title, description, a snippet, and the file path.
 
 ## Contributing
 

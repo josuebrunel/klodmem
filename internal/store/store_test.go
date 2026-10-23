@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/josuebrunel/klodmem/internal/memoryfile"
+	"github.com/josuebrunel/klodmem/internal/planfile"
+	"github.com/josuebrunel/klodmem/internal/promptfile"
 	"github.com/josuebrunel/klodmem/internal/transcript"
 )
 
@@ -230,6 +232,8 @@ func TestResetOnEmptyStoreClearsNothing(t *testing.T) {
 	for name, reset := range map[string]func(context.Context) ([]ResetReport, error){
 		"memory":  s.ResetMemory,
 		"history": s.ResetHistory,
+		"prompts": s.ResetPrompts,
+		"plans":   s.ResetPlans,
 	} {
 		reports, err := reset(ctx)
 		if err != nil {
@@ -696,5 +700,216 @@ func TestStatsEmptyStore(t *testing.T) {
 	}
 	if stats.EarliestTime != "" || stats.LatestTime != "" {
 		t.Fatalf("Stats() on empty store time range = (%q, %q), want empty strings", stats.EarliestTime, stats.LatestTime)
+	}
+}
+
+func TestUpsertPlanAndSearch(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	p := planfile.Plan{
+		Path:        "/home/u/.claude/plans/bug-md-glittery-raven.md",
+		Name:        "Plan: fix the build",
+		Description: "Plan: fix the build",
+		Content:     "# Plan: fix the build\n\nThe build fails because of a missing dependency.",
+		MTime:       100,
+	}
+	if err := s.UpsertPlan(ctx, p); err != nil {
+		t.Fatalf("UpsertPlan() error: %v", err)
+	}
+
+	mtime, ok, err := s.PlanMTime(ctx, p.Path)
+	if err != nil {
+		t.Fatalf("PlanMTime() error: %v", err)
+	}
+	if !ok || mtime != 100 {
+		t.Fatalf("PlanMTime() = (%d, %v), want (100, true)", mtime, ok)
+	}
+
+	results, err := s.SearchPlans(ctx, PlanSearchQuery{Query: "dependency"})
+	if err != nil {
+		t.Fatalf("SearchPlans() error: %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "Plan: fix the build" {
+		t.Fatalf("SearchPlans() = %+v, want one matching plan", results)
+	}
+	if !strings.Contains(results[0].Snippet, "dependency") {
+		t.Fatalf("SearchPlans()[0].Snippet = %q, want the matched text", results[0].Snippet)
+	}
+
+	// Re-upserting replaces, it does not duplicate.
+	p.MTime = 200
+	p.Content = "# Plan: fix the build\n\nUpdated text about the missing dependency."
+	if err := s.UpsertPlan(ctx, p); err != nil {
+		t.Fatalf("UpsertPlan() (update) error: %v", err)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.PlanFiles != 1 {
+		t.Fatalf("Stats().PlanFiles = %d, want 1", stats.PlanFiles)
+	}
+}
+
+func TestDeletePlan(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	p := planfile.Plan{Path: "/plans/a.md", Name: "a", Description: "d", Content: "body text", MTime: 1}
+	if err := s.UpsertPlan(ctx, p); err != nil {
+		t.Fatalf("UpsertPlan() error: %v", err)
+	}
+	if err := s.DeletePlan(ctx, p.Path); err != nil {
+		t.Fatalf("DeletePlan() error: %v", err)
+	}
+
+	if _, ok, err := s.PlanMTime(ctx, p.Path); err != nil || ok {
+		t.Fatalf("PlanMTime() after delete = (ok=%v, err=%v), want not found", ok, err)
+	}
+	results, err := s.SearchPlans(ctx, PlanSearchQuery{Query: "body"})
+	if err != nil {
+		t.Fatalf("SearchPlans() error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("SearchPlans() after delete = %d results, want 0", len(results))
+	}
+}
+
+func TestSearchPlansEmptyQuery(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	for _, q := range []string{"", "   ", "\t\n"} {
+		if _, err := s.SearchPlans(ctx, PlanSearchQuery{Query: q}); err == nil {
+			t.Fatalf("SearchPlans(%q) error = nil, want an error for a blank query", q)
+		}
+	}
+}
+
+func TestInsertPromptMessagesAndSearch(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	prompts := []promptfile.Prompt{
+		{Path: "/home/u/.claude/history.jsonl", Project: "-home-u-app", SessionID: "s1", Timestamp: "2026-08-01T00:00:00Z", Text: "why is the build failing on CI"},
+		{Path: "/home/u/.claude/history.jsonl", Project: "-home-u-app", SessionID: "s1", Timestamp: "2026-08-01T00:01:00Z", Text: "fix the missing dependency"},
+	}
+	if err := s.InsertPromptMessages(ctx, "/home/u/.claude/history.jsonl", 1234, 999, prompts); err != nil {
+		t.Fatalf("InsertPromptMessages() error: %v", err)
+	}
+
+	offset, ok, err := s.PromptOffset(ctx, "/home/u/.claude/history.jsonl")
+	if err != nil {
+		t.Fatalf("PromptOffset() error: %v", err)
+	}
+	if !ok || offset != 1234 {
+		t.Fatalf("PromptOffset() = (%d, %v), want (1234, true)", offset, ok)
+	}
+
+	results, err := s.SearchPrompts(ctx, PromptSearchQuery{Query: "dependency"})
+	if err != nil {
+		t.Fatalf("SearchPrompts() error: %v", err)
+	}
+	if len(results) != 1 || results[0].SessionID != "s1" {
+		t.Fatalf("SearchPrompts() = %+v, want one hit from s1", results)
+	}
+	if !strings.Contains(results[0].Snippet, "dependency") {
+		t.Fatalf("SearchPrompts()[0].Snippet = %q, want the matched text", results[0].Snippet)
+	}
+
+	// Re-inserting the same prompts must not duplicate them.
+	if err := s.InsertPromptMessages(ctx, "/home/u/.claude/history.jsonl", 5000, 1000, prompts); err != nil {
+		t.Fatalf("InsertPromptMessages() (same span again) error: %v", err)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.PromptMessages != len(prompts) {
+		t.Fatalf("Stats().PromptMessages = %d, want %d", stats.PromptMessages, len(prompts))
+	}
+}
+
+func TestSearchPromptsProjectFilter(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	first := []promptfile.Prompt{{Path: "/h.jsonl", Project: "-proj-a", SessionID: "s1", Text: "explain the retry logic"}}
+	second := []promptfile.Prompt{{Path: "/h.jsonl", Project: "-proj-b", SessionID: "s2", Text: "retry logic in the worker"}}
+	if err := s.InsertPromptMessages(ctx, "/h.jsonl", 10, 1, first); err != nil {
+		t.Fatalf("InsertPromptMessages() error: %v", err)
+	}
+	if err := s.InsertPromptMessages(ctx, "/h.jsonl", 20, 1, second); err != nil {
+		t.Fatalf("InsertPromptMessages() error: %v", err)
+	}
+
+	results, err := s.SearchPrompts(ctx, PromptSearchQuery{Query: "retry", Project: "-proj-b"})
+	if err != nil {
+		t.Fatalf("SearchPrompts() error: %v", err)
+	}
+	if len(results) != 1 || results[0].SessionID != "s2" {
+		t.Fatalf("SearchPrompts() project filter = %+v, want one hit from s2", results)
+	}
+}
+
+func TestDeletePromptFile(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	prompts := []promptfile.Prompt{{Path: "/h.jsonl", Project: "-p", SessionID: "s1", Text: "hello world"}}
+	if err := s.InsertPromptMessages(ctx, "/h.jsonl", 100, 1, prompts); err != nil {
+		t.Fatalf("InsertPromptMessages() error: %v", err)
+	}
+	if err := s.DeletePromptFile(ctx, "/h.jsonl"); err != nil {
+		t.Fatalf("DeletePromptFile() error: %v", err)
+	}
+	if _, ok, err := s.PromptOffset(ctx, "/h.jsonl"); err != nil || ok {
+		t.Fatalf("PromptOffset() after delete = (ok=%v, err=%v), want not found", ok, err)
+	}
+	results, err := s.SearchPrompts(ctx, PromptSearchQuery{Query: "hello"})
+	if err != nil {
+		t.Fatalf("SearchPrompts() error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("SearchPrompts() after delete = %d results, want 0", len(results))
+	}
+}
+
+func TestResetPromptsClearsOnlyPromptIndex(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	if err := s.UpsertFile(ctx, memoryfile.Memory{
+		Path: "/proj/memory/style.md", Project: "proj", Name: "style", Type: "feedback",
+		Description: "prefers table-driven tests", Content: "Use table-driven tests.", MTime: 100,
+	}); err != nil {
+		t.Fatalf("UpsertFile() error: %v", err)
+	}
+	if err := s.UpsertPlan(ctx, planfile.Plan{Path: "/plans/a.md", Name: "a", Description: "d", Content: "plan body", MTime: 1}); err != nil {
+		t.Fatalf("UpsertPlan() error: %v", err)
+	}
+	prompts := []promptfile.Prompt{{Path: "/h.jsonl", Project: "-p", SessionID: "s1", Text: "why is the build failing"}}
+	if err := s.InsertPromptMessages(ctx, "/h.jsonl", 100, 1, prompts); err != nil {
+		t.Fatalf("InsertPromptMessages() error: %v", err)
+	}
+
+	if _, err := s.ResetPrompts(ctx); err != nil {
+		t.Fatalf("ResetPrompts() error: %v", err)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.PromptMessages != 0 {
+		t.Fatalf("Stats().PromptMessages = %d after reset, want 0", stats.PromptMessages)
+	}
+	if stats.MemoryFiles != 1 || stats.PlanFiles != 1 {
+		t.Fatalf("Stats() after a prompt-only reset = %+v, want memory and plans untouched", stats)
+	}
+
+	// Prompts must be indexable again after the reset.
+	if err := s.InsertPromptMessages(ctx, "/h.jsonl", 100, 1, prompts); err != nil {
+		t.Fatalf("InsertPromptMessages() (after reset) error: %v", err)
+	}
+	results, err := s.SearchPrompts(ctx, PromptSearchQuery{Query: "failing"})
+	if err != nil {
+		t.Fatalf("SearchPrompts() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchPrompts() after reset and re-index = %d results, want 1", len(results))
 	}
 }

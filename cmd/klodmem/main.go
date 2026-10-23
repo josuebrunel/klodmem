@@ -1,5 +1,6 @@
-// Command klodmem indexes Claude Code's auto-memory markdown files into a
-// SQLite full-text index and serves search over MCP (stdio).
+// Command klodmem indexes Claude Code's auto-memory files, session
+// transcripts, global prompt history, and Plan Mode plans into a SQLite
+// full-text index and serves search over MCP (stdio).
 package main
 
 import (
@@ -15,6 +16,8 @@ import (
 	"github.com/josuebrunel/klodmem/internal/historyindexer"
 	"github.com/josuebrunel/klodmem/internal/indexer"
 	"github.com/josuebrunel/klodmem/internal/mcpserver"
+	"github.com/josuebrunel/klodmem/internal/planindexer"
+	"github.com/josuebrunel/klodmem/internal/promptindexer"
 	"github.com/josuebrunel/klodmem/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -31,12 +34,16 @@ func main() {
 }
 
 func run() error {
-	ingestAll := flag.Bool("ingest", false, "index memory and history once and exit, without starting the MCP server")
+	ingestAll := flag.Bool("ingest", false, "index memory, history, prompts and plans once and exit, without starting the MCP server")
 	ingestMemory := flag.Bool("ingest.memory", false, "index memory files only, once, and exit")
 	ingestHistory := flag.Bool("ingest.history", false, "index conversation history only, once, and exit")
-	resetAll := flag.Bool("reset", false, "truncate the index and re-index memory and history, then exit")
+	ingestPrompts := flag.Bool("ingest.prompts", false, "index the global prompt history only, once, and exit")
+	ingestPlans := flag.Bool("ingest.plans", false, "index Plan Mode plans only, once, and exit")
+	resetAll := flag.Bool("reset", false, "truncate the index and re-index memory, history, prompts and plans, then exit")
 	resetMemory := flag.Bool("reset.memory", false, "truncate the memory index and re-index it, then exit")
 	resetHistory := flag.Bool("reset.history", false, "truncate the conversation history index and re-index it, then exit")
+	resetPrompts := flag.Bool("reset.prompts", false, "truncate the prompt history index and re-index it, then exit")
+	resetPlans := flag.Bool("reset.plans", false, "truncate the plan index and re-index it, then exit")
 	stat := flag.Bool("stat", false, "print index statistics and exit, without starting the MCP server")
 	showVersion := flag.Bool("version", false, "print the klodmem version and exit")
 	flag.Parse()
@@ -48,11 +55,15 @@ func run() error {
 
 	doResetMemory := *resetAll || *resetMemory
 	doResetHistory := *resetAll || *resetHistory
+	doResetPrompts := *resetAll || *resetPrompts
+	doResetPlans := *resetAll || *resetPlans
 	// A reset always re-indexes what it cleared, so the ingest flags below are
-	// implied: -reset is -reset.memory -reset.history plus a full re-scan.
+	// implied: -reset is every -reset.<source> plus a full re-scan.
 	doMemory := *ingestAll || *ingestMemory || doResetMemory
 	doHistory := *ingestAll || *ingestHistory || doResetHistory
-	oneShot := doMemory || doHistory || *stat
+	doPrompts := *ingestAll || *ingestPrompts || doResetPrompts
+	doPlans := *ingestAll || *ingestPlans || doResetPlans
+	oneShot := doMemory || doHistory || doPrompts || doPlans || *stat
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -76,6 +87,8 @@ func run() error {
 
 	idx := indexer.New(cfg.MemoryRoot, s, log)
 	histIdx := historyindexer.New(cfg.MemoryRoot, s, log)
+	promptIdx := promptindexer.New(cfg.HistoryPath, s, log)
+	planIdx := planindexer.New(cfg.PlansRoot, s, log)
 
 	if oneShot {
 		if doResetMemory {
@@ -92,7 +105,21 @@ func run() error {
 			}
 			logReset(log, reports)
 		}
-		if doResetMemory || doResetHistory {
+		if doResetPrompts {
+			reports, err := s.ResetPrompts(ctx)
+			if err != nil {
+				return err
+			}
+			logReset(log, reports)
+		}
+		if doResetPlans {
+			reports, err := s.ResetPlans(ctx)
+			if err != nil {
+				return err
+			}
+			logReset(log, reports)
+		}
+		if doResetMemory || doResetHistory || doResetPrompts || doResetPlans {
 			// Compaction is best effort: the index is clear either way, and a
 			// VACUUM can lose the race for the write lock to another klodmem
 			// process (one runs per MCP client, all sharing this database).
@@ -107,6 +134,16 @@ func run() error {
 		}
 		if doHistory {
 			if err := histIdx.FullScan(ctx); err != nil {
+				return err
+			}
+		}
+		if doPrompts {
+			if err := promptIdx.FullScan(ctx); err != nil {
+				return err
+			}
+		}
+		if doPlans {
+			if err := planIdx.FullScan(ctx); err != nil {
 				return err
 			}
 		}
@@ -131,11 +168,25 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	promptWatcher, err := promptIdx.SetupWatcher(ctx)
+	if err != nil {
+		return err
+	}
+	planWatcher, err := planIdx.SetupWatcher(ctx)
+	if err != nil {
+		return err
+	}
 
 	if err := idx.FullScan(ctx); err != nil {
 		return err
 	}
 	if err := histIdx.FullScan(ctx); err != nil {
+		return err
+	}
+	if err := promptIdx.FullScan(ctx); err != nil {
+		return err
+	}
+	if err := planIdx.FullScan(ctx); err != nil {
 		return err
 	}
 
@@ -147,6 +198,16 @@ func run() error {
 	go func() {
 		if err := histIdx.WatchLoop(ctx, histWatcher, histWatched); err != nil {
 			log.Error("klodmem: history watch stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := promptIdx.WatchLoop(ctx, promptWatcher); err != nil {
+			log.Error("klodmem: prompt watch stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := planIdx.WatchLoop(ctx, planWatcher); err != nil {
+			log.Error("klodmem: plan watch stopped", "error", err)
 		}
 	}()
 
@@ -190,6 +251,14 @@ func printStats(ctx context.Context, s *store.Store, dbPath string) error {
 
 	fmt.Println("memory")
 	fmt.Printf("  files: %d\n\n", stats.MemoryFiles)
+
+	fmt.Println("plans")
+	fmt.Printf("  files: %d\n\n", stats.PlanFiles)
+
+	fmt.Println("prompts")
+	fmt.Printf("  prompts: %d\n", stats.PromptMessages)
+	fmt.Printf("  sessions: %d\n", stats.PromptSessions)
+	fmt.Printf("  projects: %d\n\n", stats.PromptProjects)
 
 	fmt.Println("history")
 	fmt.Printf("  messages: %d (assistant: %d, user: %d)\n",

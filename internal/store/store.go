@@ -1,5 +1,6 @@
-// Package store persists indexed memory records into a SQLite database
-// (WAL mode) with an FTS5 full-text index for search.
+// Package store persists indexed memory, conversation-history, prompt-history,
+// and plan records into a SQLite database (WAL mode) with FTS5 full-text
+// indexes for search.
 package store
 
 import (
@@ -15,6 +16,8 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/josuebrunel/klodmem/internal/memoryfile"
+	"github.com/josuebrunel/klodmem/internal/planfile"
+	"github.com/josuebrunel/klodmem/internal/promptfile"
 	"github.com/josuebrunel/klodmem/internal/transcript"
 )
 
@@ -65,6 +68,47 @@ CREATE TABLE IF NOT EXISTS history_messages (
 	role      TEXT NOT NULL,
 	text_hash TEXT NOT NULL,
 	PRIMARY KEY (path, timestamp, role, text_hash)
+);
+
+-- plan_files and plan_fts hold Plan Mode documents (~/.claude/plans/*.md).
+CREATE TABLE IF NOT EXISTS plan_files (
+	path        TEXT PRIMARY KEY,
+	name        TEXT NOT NULL,
+	description TEXT NOT NULL,
+	mtime       INTEGER NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS plan_fts USING fts5(
+	path UNINDEXED,
+	name,
+	description,
+	content,
+	tokenize = 'porter'
+);
+
+-- prompt_files/prompt_fts/prompt_messages hold the global prompt history
+-- (~/.claude/history.jsonl), indexed incrementally like transcripts.
+CREATE TABLE IF NOT EXISTS prompt_files (
+	path        TEXT PRIMARY KEY,
+	byte_offset INTEGER NOT NULL,
+	mtime       INTEGER NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS prompt_fts USING fts5(
+	path UNINDEXED,
+	session_id UNINDEXED,
+	timestamp UNINDEXED,
+	project,
+	text,
+	tokenize = 'porter'
+);
+
+CREATE TABLE IF NOT EXISTS prompt_messages (
+	path       TEXT NOT NULL,
+	timestamp  TEXT NOT NULL,
+	session_id TEXT NOT NULL,
+	text_hash  TEXT NOT NULL,
+	PRIMARY KEY (path, timestamp, session_id, text_hash)
 );
 `
 
@@ -466,6 +510,331 @@ func (s *Store) SearchHistory(ctx context.Context, q HistorySearchQuery) ([]Hist
 	return results, nil
 }
 
+// AllPlanPaths returns every indexed plan file path, for pruning against
+// what's actually present on disk.
+func (s *Store) AllPlanPaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM plan_files`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list plan paths: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("store: scan plan path: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate plan paths: %w", err)
+	}
+	return paths, nil
+}
+
+// PlanMTime returns the indexed mtime for path, and whether a row exists.
+func (s *Store) PlanMTime(ctx context.Context, path string) (int64, bool, error) {
+	var mtime int64
+	err := s.db.QueryRowContext(ctx, `SELECT mtime FROM plan_files WHERE path = ?`, path).Scan(&mtime)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("store: query plan mtime for %s: %w", path, err)
+	}
+	return mtime, true, nil
+}
+
+// UpsertPlan replaces the indexed record and FTS row for p.Path.
+func (s *Store) UpsertPlan(ctx context.Context, p planfile.Plan) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin plan upsert tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := deletePlanTx(ctx, tx, p.Path); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO plan_files (path, name, description, mtime) VALUES (?, ?, ?, ?)`,
+		p.Path, p.Name, p.Description, p.MTime,
+	); err != nil {
+		return fmt.Errorf("store: insert plan %s: %w", p.Path, err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO plan_fts (path, name, description, content) VALUES (?, ?, ?, ?)`,
+		p.Path, p.Name, p.Description, p.Content,
+	); err != nil {
+		return fmt.Errorf("store: insert plan fts row for %s: %w", p.Path, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit plan upsert for %s: %w", p.Path, err)
+	}
+	return nil
+}
+
+// DeletePlan removes any indexed record and FTS row for path.
+func (s *Store) DeletePlan(ctx context.Context, path string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin plan delete tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := deletePlanTx(ctx, tx, path); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit plan delete for %s: %w", path, err)
+	}
+	return nil
+}
+
+func deletePlanTx(ctx context.Context, tx *sql.Tx, path string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM plan_files WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("store: delete plan %s: %w", path, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM plan_fts WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("store: delete plan fts row %s: %w", path, err)
+	}
+	return nil
+}
+
+// PlanSearchQuery holds the parameters for a plan search.
+type PlanSearchQuery struct {
+	Query string
+	Limit int
+}
+
+// PlanSearchResult is one match returned from SearchPlans.
+type PlanSearchResult struct {
+	Path        string
+	Name        string
+	Description string
+	Snippet     string
+}
+
+// SearchPlans runs an FTS5 match against the plan index, ordered by relevance.
+func (s *Store) SearchPlans(ctx context.Context, q PlanSearchQuery) ([]PlanSearchResult, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	matchExpr := sanitizeFTSQuery(q.Query)
+	if matchExpr == "" {
+		return nil, fmt.Errorf("store: search plans: empty query")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT path, name, description,
+		       snippet(plan_fts, 3, '[', ']', '...', 12) AS snip
+		FROM plan_fts
+		WHERE plan_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, matchExpr, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: search plans %q: %w", q.Query, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []PlanSearchResult
+	for rows.Next() {
+		var r PlanSearchResult
+		if err := rows.Scan(&r.Path, &r.Name, &r.Description, &r.Snippet); err != nil {
+			return nil, fmt.Errorf("store: scan plan search result: %w", err)
+		}
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate plan search results: %w", err)
+	}
+	return results, nil
+}
+
+// PromptOffset returns the byte offset up to which path has already been
+// parsed, and whether a row exists (a new file starts at offset 0).
+func (s *Store) PromptOffset(ctx context.Context, path string) (int64, bool, error) {
+	var offset int64
+	err := s.db.QueryRowContext(ctx, `SELECT byte_offset FROM prompt_files WHERE path = ?`, path).Scan(&offset)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("store: query prompt offset for %s: %w", path, err)
+	}
+	return offset, true, nil
+}
+
+// InsertPromptMessages records that path has been parsed up to newOffset and
+// inserts prompts (the prompts found in the newly-parsed span), all in one
+// transaction. Prompts already indexed for path are skipped, so re-reading a
+// span (a rewritten history file, or a concurrent scan) adds nothing.
+func (s *Store) InsertPromptMessages(ctx context.Context, path string, newOffset, mtime int64, prompts []promptfile.Prompt) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin prompt insert tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO prompt_files (path, byte_offset, mtime)
+		VALUES (?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET byte_offset = excluded.byte_offset, mtime = excluded.mtime
+	`, path, newOffset, mtime); err != nil {
+		return fmt.Errorf("store: upsert prompt offset for %s: %w", path, err)
+	}
+
+	for _, p := range prompts {
+		if err := insertPromptMessage(ctx, tx, path, p); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit prompt insert for %s: %w", path, err)
+	}
+	return nil
+}
+
+func insertPromptMessage(ctx context.Context, tx *sql.Tx, path string, p promptfile.Prompt) error {
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO prompt_messages (path, timestamp, session_id, text_hash)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT DO NOTHING
+	`, path, p.Timestamp, p.SessionID, textHash(p.Text))
+	if err != nil {
+		return fmt.Errorf("store: claim prompt message for %s: %w", path, err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: check prompt message claim for %s: %w", path, err)
+	}
+	if inserted == 0 {
+		return nil // already indexed
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO prompt_fts (path, session_id, timestamp, project, text) VALUES (?, ?, ?, ?, ?)`,
+		path, p.SessionID, p.Timestamp, p.Project, p.Text,
+	); err != nil {
+		return fmt.Errorf("store: insert prompt message for %s: %w", path, err)
+	}
+	return nil
+}
+
+// DeletePromptFile removes all indexed prompts for a history file.
+func (s *Store) DeletePromptFile(ctx context.Context, path string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin prompt delete tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM prompt_files WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("store: delete prompt file %s: %w", path, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM prompt_fts WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("store: delete prompt rows for %s: %w", path, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM prompt_messages WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("store: delete prompt message keys for %s: %w", path, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit prompt delete for %s: %w", path, err)
+	}
+	return nil
+}
+
+// AllPromptPaths returns every indexed prompt file path.
+func (s *Store) AllPromptPaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM prompt_files`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list prompt paths: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("store: scan prompt path: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate prompt paths: %w", err)
+	}
+	return paths, nil
+}
+
+// PromptSearchQuery holds the parameters for a prompt-history search.
+type PromptSearchQuery struct {
+	Query   string
+	Project string
+	Limit   int
+}
+
+// PromptSearchResult is one match returned from SearchPrompts.
+type PromptSearchResult struct {
+	Path      string
+	SessionID string
+	Timestamp string
+	Project   string
+	Snippet   string
+}
+
+// SearchPrompts runs an FTS5 match against the global prompt history,
+// optionally filtered by project, ordered by relevance.
+func (s *Store) SearchPrompts(ctx context.Context, q PromptSearchQuery) ([]PromptSearchResult, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	matchExpr := sanitizeFTSQuery(q.Query)
+	if matchExpr == "" {
+		return nil, fmt.Errorf("store: search prompts: empty query")
+	}
+	if q.Project != "" {
+		matchExpr = fmt.Sprintf("project:%s AND (%s)", quoteFTSTerm(q.Project), matchExpr)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT path, session_id, timestamp, project,
+		       snippet(prompt_fts, 4, '[', ']', '...', 12) AS snip
+		FROM prompt_fts
+		WHERE prompt_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, matchExpr, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: search prompts %q: %w", q.Query, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []PromptSearchResult
+	for rows.Next() {
+		var r PromptSearchResult
+		if err := rows.Scan(&r.Path, &r.SessionID, &r.Timestamp, &r.Project, &r.Snippet); err != nil {
+			return nil, fmt.Errorf("store: scan prompt search result: %w", err)
+		}
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate prompt search results: %w", err)
+	}
+	return results, nil
+}
+
 // ResetReport is one table's contribution to a reset: its name and how many
 // rows it held before the reset cleared it.
 type ResetReport struct {
@@ -487,6 +856,19 @@ func (s *Store) ResetMemory(ctx context.Context) ([]ResetReport, error) {
 // indexed, and the re-index would silently do nothing.
 func (s *Store) ResetHistory(ctx context.Context) ([]ResetReport, error) {
 	return s.reset(ctx, "transcript_files", "history_fts", "history_messages")
+}
+
+// ResetPlans clears the plan index. The markdown files are untouched, so a
+// scan afterwards rebuilds it.
+func (s *Store) ResetPlans(ctx context.Context) ([]ResetReport, error) {
+	return s.reset(ctx, "plan_files", "plan_fts")
+}
+
+// ResetPrompts clears the prompt-history index. prompt_files holds the byte
+// offset and prompt_messages holds the dedup identities, so both have to go
+// for the next scan to re-read and re-index the file.
+func (s *Store) ResetPrompts(ctx context.Context) ([]ResetReport, error) {
+	return s.reset(ctx, "prompt_files", "prompt_fts", "prompt_messages")
 }
 
 // Vacuum rewrites the database file, returning the space a reset freed to the
@@ -541,6 +923,10 @@ type Stats struct {
 	HistoryMessages int
 	HistorySessions int
 	HistoryProjects int
+	PlanFiles       int
+	PromptMessages  int
+	PromptSessions  int
+	PromptProjects  int
 	RoleCounts      map[string]int
 	ByProject       []ProjectStat
 	EarliestTime    string
@@ -554,6 +940,16 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&stats.MemoryFiles); err != nil {
 		return Stats{}, fmt.Errorf("store: count memory files: %w", err)
+	}
+
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plan_files`).Scan(&stats.PlanFiles); err != nil {
+		return Stats{}, fmt.Errorf("store: count plan files: %w", err)
+	}
+
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COUNT(DISTINCT session_id), COUNT(DISTINCT project) FROM prompt_fts
+	`).Scan(&stats.PromptMessages, &stats.PromptSessions, &stats.PromptProjects); err != nil {
+		return Stats{}, fmt.Errorf("store: count prompts: %w", err)
 	}
 
 	if err := s.db.QueryRowContext(ctx, `

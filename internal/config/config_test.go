@@ -54,6 +54,8 @@ func unsetEnv(t *testing.T, key string) {
 
 func TestLoadDefaults(t *testing.T) {
 	unsetEnv(t, "KLODMEM_MEMORY_ROOT")
+	unsetEnv(t, "KLODMEM_PLANS_ROOT")
+	unsetEnv(t, "KLODMEM_HISTORY_PATH")
 	unsetEnv(t, "KLODMEM_DB_PATH")
 	unsetEnv(t, "KLODMEM_LOG_LEVEL")
 
@@ -70,6 +72,12 @@ func TestLoadDefaults(t *testing.T) {
 	if want := filepath.Join(home, ".claude/projects"); cfg.MemoryRoot != want {
 		t.Fatalf("Load().MemoryRoot = %q, want %q", cfg.MemoryRoot, want)
 	}
+	if want := filepath.Join(home, ".claude/plans"); cfg.PlansRoot != want {
+		t.Fatalf("Load().PlansRoot = %q, want %q", cfg.PlansRoot, want)
+	}
+	if want := filepath.Join(home, ".claude/history.jsonl"); cfg.HistoryPath != want {
+		t.Fatalf("Load().HistoryPath = %q, want %q", cfg.HistoryPath, want)
+	}
 	if want := filepath.Join(home, ".claude/klodmem/klodmem.db"); cfg.DBPath != want {
 		t.Fatalf("Load().DBPath = %q, want %q", cfg.DBPath, want)
 	}
@@ -85,6 +93,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 
 	t.Setenv("KLODMEM_MEMORY_ROOT", "~/custom/projects")
+	t.Setenv("KLODMEM_PLANS_ROOT", "~/custom/plans")
+	t.Setenv("KLODMEM_HISTORY_PATH", "~/custom/history.jsonl")
 	t.Setenv("KLODMEM_DB_PATH", "/tmp/custom/klodmem.db")
 	t.Setenv("KLODMEM_LOG_LEVEL", "debug")
 
@@ -95,6 +105,12 @@ func TestLoadEnvOverrides(t *testing.T) {
 
 	if want := filepath.Join(home, "custom/projects"); cfg.MemoryRoot != want {
 		t.Fatalf("Load().MemoryRoot = %q, want %q (tilde-expanded)", cfg.MemoryRoot, want)
+	}
+	if want := filepath.Join(home, "custom/plans"); cfg.PlansRoot != want {
+		t.Fatalf("Load().PlansRoot = %q, want %q (tilde-expanded)", cfg.PlansRoot, want)
+	}
+	if want := filepath.Join(home, "custom/history.jsonl"); cfg.HistoryPath != want {
+		t.Fatalf("Load().HistoryPath = %q, want %q (tilde-expanded)", cfg.HistoryPath, want)
 	}
 	if cfg.DBPath != "/tmp/custom/klodmem.db" {
 		t.Fatalf("Load().DBPath = %q, want %q (absolute path passed through)", cfg.DBPath, "/tmp/custom/klodmem.db")

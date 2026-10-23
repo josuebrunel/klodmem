@@ -11,6 +11,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/josuebrunel/klodmem/internal/memoryfile"
+	"github.com/josuebrunel/klodmem/internal/planfile"
+	"github.com/josuebrunel/klodmem/internal/promptfile"
 	"github.com/josuebrunel/klodmem/internal/store"
 	"github.com/josuebrunel/klodmem/internal/transcript"
 )
@@ -239,8 +241,10 @@ func TestNew(t *testing.T) {
 	for _, tool := range toolList.Tools {
 		names[tool.Name] = true
 	}
-	if !names["search_memory"] || !names["search_history"] {
-		t.Fatalf("ListTools() = %v, want both search_memory and search_history registered", names)
+	for _, want := range []string{"search_memory", "search_history", "search_prompts", "search_plans"} {
+		if !names[want] {
+			t.Fatalf("ListTools() = %v, want %s registered", names, want)
+		}
 	}
 
 	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
@@ -293,5 +297,158 @@ func TestFormatHistoryResults(t *testing.T) {
 	got = formatHistoryResults(two)
 	if !strings.Contains(got, "\n\n") {
 		t.Fatalf("formatHistoryResults(two) = %q, want a blank-line separator between results", got)
+	}
+}
+
+func TestHandleSearchPrompts(t *testing.T) {
+	s, ctx := openTestStore(t)
+	log := testLogger()
+
+	prompts := []promptfile.Prompt{
+		{Path: "/h.jsonl", Project: "-proj-a", SessionID: "s1", Timestamp: "2026-08-01T00:00:00Z", Text: "the build fails on CI with a missing dependency"},
+	}
+	if err := s.InsertPromptMessages(ctx, "/h.jsonl", 100, 1, prompts); err != nil {
+		t.Fatalf("InsertPromptMessages() error: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		in          PromptSearchInput
+		wantErr     bool
+		wantContain []string
+	}{
+		{
+			name:        "empty query",
+			in:          PromptSearchInput{Query: ""},
+			wantErr:     true,
+			wantContain: []string{"query must not be empty"},
+		},
+		{
+			name:        "no results",
+			in:          PromptSearchInput{Query: "nonexistentterm"},
+			wantErr:     false,
+			wantContain: []string{"no matching prompts found"},
+		},
+		{
+			name:    "real hit",
+			in:      PromptSearchInput{Query: "dependency"},
+			wantErr: false,
+			wantContain: []string{
+				"-proj-a", "2026-08-01T00:00:00Z", "dependency", "s1", "/h.jsonl",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, _, err := handleSearchPrompts(ctx, s, log, tt.in)
+			if err != nil {
+				t.Fatalf("handleSearchPrompts() error: %v", err)
+			}
+			if res.IsError != tt.wantErr {
+				t.Fatalf("handleSearchPrompts() IsError = %v, want %v", res.IsError, tt.wantErr)
+			}
+			text := contentText(res)
+			for _, want := range tt.wantContain {
+				if !strings.Contains(text, want) {
+					t.Fatalf("handleSearchPrompts() text = %q, want it to contain %q", text, want)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleSearchPlans(t *testing.T) {
+	s, ctx := openTestStore(t)
+	log := testLogger()
+
+	if err := s.UpsertPlan(ctx, planfile.Plan{
+		Path: "/plans/bug-md-glittery-raven.md", Name: "Plan: fix the build",
+		Description: "Plan: fix the build",
+		Content:     "# Plan: fix the build\n\nThe build fails because of a missing dependency.",
+		MTime:       1,
+	}); err != nil {
+		t.Fatalf("UpsertPlan() error: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		in          PlanSearchInput
+		wantErr     bool
+		wantContain []string
+	}{
+		{
+			name:        "empty query",
+			in:          PlanSearchInput{Query: ""},
+			wantErr:     true,
+			wantContain: []string{"query must not be empty"},
+		},
+		{
+			name:        "no results",
+			in:          PlanSearchInput{Query: "nonexistentterm"},
+			wantErr:     false,
+			wantContain: []string{"no matching plans found"},
+		},
+		{
+			name:    "real hit",
+			in:      PlanSearchInput{Query: "dependency"},
+			wantErr: false,
+			wantContain: []string{
+				"Plan: fix the build", "dependency", "/plans/bug-md-glittery-raven.md",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, _, err := handleSearchPlans(ctx, s, log, tt.in)
+			if err != nil {
+				t.Fatalf("handleSearchPlans() error: %v", err)
+			}
+			if res.IsError != tt.wantErr {
+				t.Fatalf("handleSearchPlans() IsError = %v, want %v", res.IsError, tt.wantErr)
+			}
+			text := contentText(res)
+			for _, want := range tt.wantContain {
+				if !strings.Contains(text, want) {
+					t.Fatalf("handleSearchPlans() text = %q, want it to contain %q", text, want)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatPromptResults(t *testing.T) {
+	if got := formatPromptResults(nil); got != "" {
+		t.Fatalf("formatPromptResults(nil) = %q, want empty string", got)
+	}
+
+	one := []store.PromptSearchResult{
+		{Path: "/h.jsonl", SessionID: "s1", Timestamp: "t1", Project: "-p", Snippet: "snip1"},
+	}
+	got := formatPromptResults(one)
+	for _, want := range []string{"-p", "t1", "snip1", "s1", "/h.jsonl"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatPromptResults(one) = %q, want it to contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "\n\n") {
+		t.Fatalf("formatPromptResults(one) = %q, want no separator for a single result", got)
+	}
+}
+
+func TestFormatPlanResults(t *testing.T) {
+	if got := formatPlanResults(nil); got != "" {
+		t.Fatalf("formatPlanResults(nil) = %q, want empty string", got)
+	}
+
+	one := []store.PlanSearchResult{
+		{Path: "/plans/a.md", Name: "Plan: a", Description: "desc", Snippet: "snip"},
+	}
+	got := formatPlanResults(one)
+	for _, want := range []string{"Plan: a", "desc", "snip", "/plans/a.md"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatPlanResults(one) = %q, want it to contain %q", got, want)
+		}
 	}
 }
