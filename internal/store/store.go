@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -110,6 +111,23 @@ CREATE TABLE IF NOT EXISTS prompt_messages (
 	text_hash  TEXT NOT NULL,
 	PRIMARY KEY (path, timestamp, session_id, text_hash)
 );
+
+-- tool_calls records one row per MCP tool invocation. Unlike the tables
+-- above, it is usage data and is not rebuilt from files, so -reset leaves it
+-- intact.
+CREATE TABLE IF NOT EXISTS tool_calls (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts           INTEGER NOT NULL,
+	tool         TEXT NOT NULL,
+	query        TEXT NOT NULL DEFAULT '',
+	project      TEXT NOT NULL DEFAULT '',
+	result_count INTEGER NOT NULL DEFAULT 0,
+	is_error     INTEGER NOT NULL DEFAULT 0,
+	duration_ms  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls(ts);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool);
 `
 
 // Store wraps a SQLite connection holding the memory index.
@@ -833,6 +851,138 @@ func (s *Store) SearchPrompts(ctx context.Context, q PromptSearchQuery) ([]Promp
 		return nil, fmt.Errorf("store: iterate prompt search results: %w", err)
 	}
 	return results, nil
+}
+
+// ToolCall is one recorded MCP tool invocation.
+type ToolCall struct {
+	Timestamp   time.Time
+	Tool        string
+	Query       string
+	Project     string
+	ResultCount int
+	IsError     bool
+	Duration    time.Duration
+}
+
+// RecordToolCall persists one MCP tool invocation.
+func (s *Store) RecordToolCall(ctx context.Context, c ToolCall) error {
+	isError := 0
+	if c.IsError {
+		isError = 1
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO tool_calls (ts, tool, query, project, result_count, is_error, duration_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, c.Timestamp.UnixMilli(), c.Tool, c.Query, c.Project, c.ResultCount, isError, c.Duration.Milliseconds()); err != nil {
+		return fmt.Errorf("store: record tool call %s: %w", c.Tool, err)
+	}
+	return nil
+}
+
+// ToolStat is one tool's contribution to ToolCallStats.
+type ToolStat struct {
+	Tool          string
+	Calls         int
+	Errors        int
+	AvgDurationMs int64
+	LastUsed      string
+}
+
+// QueryStat is one query's call count.
+type QueryStat struct {
+	Query string
+	Calls int
+}
+
+// ToolCallStats summarizes recorded MCP usage.
+type ToolCallStats struct {
+	TotalCalls int
+	Errors     int
+	ByTool     []ToolStat
+	TopQueries []QueryStat
+	FirstCall  string
+	LastCall   string
+}
+
+// ToolCallStats aggregates recorded MCP tool invocations. limit bounds
+// TopQueries (0 uses 10).
+func (s *Store) ToolCallStats(ctx context.Context, limit int) (ToolCallStats, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	var stats ToolCallStats
+
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(is_error), 0) FROM tool_calls
+	`).Scan(&stats.TotalCalls, &stats.Errors); err != nil {
+		return ToolCallStats{}, fmt.Errorf("store: count tool calls: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT tool, COUNT(*), COALESCE(SUM(is_error), 0),
+		       CAST(COALESCE(AVG(duration_ms), 0) AS INTEGER), MAX(ts)
+		FROM tool_calls
+		GROUP BY tool
+		ORDER BY COUNT(*) DESC, tool
+	`)
+	if err != nil {
+		return ToolCallStats{}, fmt.Errorf("store: tool call stats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var st ToolStat
+		var lastMs int64
+		if err := rows.Scan(&st.Tool, &st.Calls, &st.Errors, &st.AvgDurationMs, &lastMs); err != nil {
+			return ToolCallStats{}, fmt.Errorf("store: scan tool stat: %w", err)
+		}
+		st.LastUsed = formatMillis(lastMs)
+		stats.ByTool = append(stats.ByTool, st)
+	}
+	if err := rows.Err(); err != nil {
+		return ToolCallStats{}, fmt.Errorf("store: iterate tool stats: %w", err)
+	}
+
+	queryRows, err := s.db.QueryContext(ctx, `
+		SELECT query, COUNT(*) FROM tool_calls
+		WHERE query != ''
+		GROUP BY query
+		ORDER BY COUNT(*) DESC, query
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return ToolCallStats{}, fmt.Errorf("store: top queries: %w", err)
+	}
+	defer func() { _ = queryRows.Close() }()
+	for queryRows.Next() {
+		var qs QueryStat
+		if err := queryRows.Scan(&qs.Query, &qs.Calls); err != nil {
+			return ToolCallStats{}, fmt.Errorf("store: scan query stat: %w", err)
+		}
+		stats.TopQueries = append(stats.TopQueries, qs)
+	}
+	if err := queryRows.Err(); err != nil {
+		return ToolCallStats{}, fmt.Errorf("store: iterate query stats: %w", err)
+	}
+
+	var first, last sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MIN(ts), MAX(ts) FROM tool_calls`).Scan(&first, &last); err != nil {
+		return ToolCallStats{}, fmt.Errorf("store: query tool call range: %w", err)
+	}
+	stats.FirstCall = formatNullableMillis(first)
+	stats.LastCall = formatNullableMillis(last)
+
+	return stats, nil
+}
+
+func formatMillis(ms int64) string {
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
+}
+
+func formatNullableMillis(n sql.NullInt64) string {
+	if !n.Valid {
+		return ""
+	}
+	return formatMillis(n.Int64)
 }
 
 // ResetReport is one table's contribution to a reset: its name and how many

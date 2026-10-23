@@ -1,5 +1,6 @@
 // Package mcpserver exposes the memory, history, prompt, and plan indexes to
-// Claude Code as MCP tools over stdio.
+// Claude Code as MCP tools over stdio, and records per-tool usage for
+// usage_stats.
 package mcpserver
 
 import (
@@ -7,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -42,10 +44,14 @@ type PlanSearchInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"maximum number of results to return (default 10)"`
 }
 
-// New builds an MCP server exposing search_memory, search_history,
-// search_prompts and search_plans, all backed by s. version is reported to
-// clients as the server implementation version; an empty string falls back to
-// "dev".
+// UsageStatsInput is the usage_stats tool's input schema.
+type UsageStatsInput struct {
+	Limit int `json:"limit,omitempty" jsonschema:"maximum number of top queries to return (default 10)"`
+}
+
+// New builds an MCP server exposing the search tools and usage_stats, all
+// backed by s. version is reported to clients as the server implementation
+// version; an empty string falls back to "dev".
 func New(s *store.Store, log *slog.Logger, version string) *mcp.Server {
 	if log == nil {
 		log = slog.Default()
@@ -84,15 +90,26 @@ func New(s *store.Store, log *slog.Logger, version string) *mcp.Server {
 		return handleSearchPlans(ctx, s, log, in)
 	})
 
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "usage_stats",
+		Description: "Aggregate statistics for this klodmem server's own tool usage: total calls, errors, per-tool counts, average latency, last use, and the most frequent queries.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in UsageStatsInput) (*mcp.CallToolResult, any, error) {
+		return handleUsageStats(ctx, s, log, in)
+	})
+
 	return server
 }
 
 func handleSearchMemory(ctx context.Context, s *store.Store, log *slog.Logger, in SearchInput) (*mcp.CallToolResult, any, error) {
+	start := time.Now()
+	out := searchMemory(ctx, s, log, in)
+	recordToolCall(ctx, s, log, "search_memory", in.Query, in.Project, out, start)
+	return out.result(), nil, nil
+}
+
+func searchMemory(ctx context.Context, s *store.Store, log *slog.Logger, in SearchInput) outcome {
 	if strings.TrimSpace(in.Query) == "" {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "query must not be empty"}},
-			IsError: true,
-		}, nil, nil
+		return outcome{text: "query must not be empty", isError: true}
 	}
 
 	results, err := s.Search(ctx, store.SearchQuery{
@@ -103,22 +120,14 @@ func handleSearchMemory(ctx context.Context, s *store.Store, log *slog.Logger, i
 	})
 	if err != nil {
 		log.Error("mcpserver: search failed", "query", in.Query, "error", err)
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("search failed: %v", err)}},
-			IsError: true,
-		}, nil, nil
+		return outcome{text: fmt.Sprintf("search failed: %v", err), isError: true}
 	}
 
 	if len(results) == 0 {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "no matching memories found"}},
-		}, nil, nil
+		return outcome{text: "no matching memories found"}
 	}
 
-	text := formatResults(results)
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: text}},
-	}, nil, nil
+	return outcome{text: formatResults(results), count: len(results)}
 }
 
 func formatResults(results []store.SearchResult) string {
@@ -134,11 +143,15 @@ func formatResults(results []store.SearchResult) string {
 }
 
 func handleSearchHistory(ctx context.Context, s *store.Store, log *slog.Logger, in HistorySearchInput) (*mcp.CallToolResult, any, error) {
+	start := time.Now()
+	out := searchHistory(ctx, s, log, in)
+	recordToolCall(ctx, s, log, "search_history", in.Query, in.Project, out, start)
+	return out.result(), nil, nil
+}
+
+func searchHistory(ctx context.Context, s *store.Store, log *slog.Logger, in HistorySearchInput) outcome {
 	if strings.TrimSpace(in.Query) == "" {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "query must not be empty"}},
-			IsError: true,
-		}, nil, nil
+		return outcome{text: "query must not be empty", isError: true}
 	}
 
 	results, err := s.SearchHistory(ctx, store.HistorySearchQuery{
@@ -149,22 +162,14 @@ func handleSearchHistory(ctx context.Context, s *store.Store, log *slog.Logger, 
 	})
 	if err != nil {
 		log.Error("mcpserver: history search failed", "query", in.Query, "error", err)
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("search failed: %v", err)}},
-			IsError: true,
-		}, nil, nil
+		return outcome{text: fmt.Sprintf("search failed: %v", err), isError: true}
 	}
 
 	if len(results) == 0 {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "no matching conversation history found"}},
-		}, nil, nil
+		return outcome{text: "no matching conversation history found"}
 	}
 
-	text := formatHistoryResults(results)
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: text}},
-	}, nil, nil
+	return outcome{text: formatHistoryResults(results), count: len(results)}
 }
 
 func formatHistoryResults(results []store.HistorySearchResult) string {
@@ -180,11 +185,15 @@ func formatHistoryResults(results []store.HistorySearchResult) string {
 }
 
 func handleSearchPrompts(ctx context.Context, s *store.Store, log *slog.Logger, in PromptSearchInput) (*mcp.CallToolResult, any, error) {
+	start := time.Now()
+	out := searchPrompts(ctx, s, log, in)
+	recordToolCall(ctx, s, log, "search_prompts", in.Query, in.Project, out, start)
+	return out.result(), nil, nil
+}
+
+func searchPrompts(ctx context.Context, s *store.Store, log *slog.Logger, in PromptSearchInput) outcome {
 	if strings.TrimSpace(in.Query) == "" {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "query must not be empty"}},
-			IsError: true,
-		}, nil, nil
+		return outcome{text: "query must not be empty", isError: true}
 	}
 
 	results, err := s.SearchPrompts(ctx, store.PromptSearchQuery{
@@ -194,21 +203,14 @@ func handleSearchPrompts(ctx context.Context, s *store.Store, log *slog.Logger, 
 	})
 	if err != nil {
 		log.Error("mcpserver: prompt search failed", "query", in.Query, "error", err)
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("search failed: %v", err)}},
-			IsError: true,
-		}, nil, nil
+		return outcome{text: fmt.Sprintf("search failed: %v", err), isError: true}
 	}
 
 	if len(results) == 0 {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "no matching prompts found"}},
-		}, nil, nil
+		return outcome{text: "no matching prompts found"}
 	}
 
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: formatPromptResults(results)}},
-	}, nil, nil
+	return outcome{text: formatPromptResults(results), count: len(results)}
 }
 
 func formatPromptResults(results []store.PromptSearchResult) string {
@@ -224,11 +226,15 @@ func formatPromptResults(results []store.PromptSearchResult) string {
 }
 
 func handleSearchPlans(ctx context.Context, s *store.Store, log *slog.Logger, in PlanSearchInput) (*mcp.CallToolResult, any, error) {
+	start := time.Now()
+	out := searchPlans(ctx, s, log, in)
+	recordToolCall(ctx, s, log, "search_plans", in.Query, "", out, start)
+	return out.result(), nil, nil
+}
+
+func searchPlans(ctx context.Context, s *store.Store, log *slog.Logger, in PlanSearchInput) outcome {
 	if strings.TrimSpace(in.Query) == "" {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "query must not be empty"}},
-			IsError: true,
-		}, nil, nil
+		return outcome{text: "query must not be empty", isError: true}
 	}
 
 	results, err := s.SearchPlans(ctx, store.PlanSearchQuery{
@@ -237,21 +243,14 @@ func handleSearchPlans(ctx context.Context, s *store.Store, log *slog.Logger, in
 	})
 	if err != nil {
 		log.Error("mcpserver: plan search failed", "query", in.Query, "error", err)
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("search failed: %v", err)}},
-			IsError: true,
-		}, nil, nil
+		return outcome{text: fmt.Sprintf("search failed: %v", err), isError: true}
 	}
 
 	if len(results) == 0 {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "no matching plans found"}},
-		}, nil, nil
+		return outcome{text: "no matching plans found"}
 	}
 
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: formatPlanResults(results)}},
-	}, nil, nil
+	return outcome{text: formatPlanResults(results), count: len(results)}
 }
 
 func formatPlanResults(results []store.PlanSearchResult) string {
@@ -264,4 +263,80 @@ func formatPlanResults(results []store.PlanSearchResult) string {
 			r.Name, r.Description, r.Snippet, r.Path)
 	}
 	return out
+}
+
+// outcome is a tool handler's result before it is wrapped for MCP. count is
+// the number of matches found (0 for errors and empty results), recorded for
+// usage statistics.
+type outcome struct {
+	text    string
+	count   int
+	isError bool
+}
+
+func (o outcome) result() *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: o.text}},
+		IsError: o.isError,
+	}
+}
+
+// recordToolCall persists one invocation for usage_stats. It is best effort:
+// a logging failure must never fail the search the user asked for.
+func recordToolCall(ctx context.Context, s *store.Store, log *slog.Logger, tool, query, project string, out outcome, start time.Time) {
+	if err := s.RecordToolCall(ctx, store.ToolCall{
+		Timestamp:   time.Now(),
+		Tool:        tool,
+		Query:       query,
+		Project:     project,
+		ResultCount: out.count,
+		IsError:     out.isError,
+		Duration:    time.Since(start),
+	}); err != nil {
+		log.Warn("mcpserver: record tool call failed", "tool", tool, "error", err)
+	}
+}
+
+func handleUsageStats(ctx context.Context, s *store.Store, log *slog.Logger, in UsageStatsInput) (*mcp.CallToolResult, any, error) {
+	start := time.Now()
+
+	stats, err := s.ToolCallStats(ctx, in.Limit)
+	out := outcome{}
+	switch {
+	case err != nil:
+		log.Error("mcpserver: usage stats failed", "error", err)
+		out = outcome{text: fmt.Sprintf("stats failed: %v", err), isError: true}
+	case stats.TotalCalls == 0:
+		out = outcome{text: "no tool calls recorded yet"}
+	default:
+		out = outcome{text: formatUsageStats(stats), count: len(stats.ByTool)}
+	}
+
+	recordToolCall(ctx, s, log, "usage_stats", "", "", out, start)
+	return out.result(), nil, nil
+}
+
+func formatUsageStats(stats store.ToolCallStats) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "tool calls: %d (errors: %d)\n", stats.TotalCalls, stats.Errors)
+	if stats.FirstCall != "" {
+		fmt.Fprintf(&b, "range: %s to %s\n", stats.FirstCall, stats.LastCall)
+	}
+
+	if len(stats.ByTool) > 0 {
+		b.WriteString("\nby tool\n")
+		for _, t := range stats.ByTool {
+			fmt.Fprintf(&b, "  %-16s %6d calls  %4d errors  %5d ms avg  last %s\n",
+				t.Tool, t.Calls, t.Errors, t.AvgDurationMs, t.LastUsed)
+		}
+	}
+
+	if len(stats.TopQueries) > 0 {
+		b.WriteString("\ntop queries\n")
+		for _, q := range stats.TopQueries {
+			fmt.Fprintf(&b, "  %6d  %s\n", q.Calls, q.Query)
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n")
 }

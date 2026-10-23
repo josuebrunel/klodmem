@@ -44,7 +44,7 @@ func run() error {
 	resetHistory := flag.Bool("reset.history", false, "truncate the conversation history index and re-index it, then exit")
 	resetPrompts := flag.Bool("reset.prompts", false, "truncate the prompt history index and re-index it, then exit")
 	resetPlans := flag.Bool("reset.plans", false, "truncate the plan index and re-index it, then exit")
-	stat := flag.Bool("stat", false, "print index statistics and exit, without starting the MCP server")
+	stat := flag.Bool("stat", false, "print index and MCP usage statistics and exit, without starting the MCP server")
 	showVersion := flag.Bool("version", false, "print the klodmem version and exit")
 	flag.Parse()
 
@@ -273,6 +273,26 @@ func printStats(ctx context.Context, s *store.Store, dbPath string) error {
 		fmt.Println("\nby project")
 		for _, p := range stats.ByProject {
 			fmt.Printf("  %-60s %6d messages  %4d sessions\n", p.Project, p.Messages, p.Sessions)
+		}
+	}
+
+	usage, err := s.ToolCallStats(ctx, 5)
+	if err != nil {
+		return err
+	}
+	fmt.Println("\nmcp calls")
+	fmt.Printf("  calls: %d (errors: %d)\n", usage.TotalCalls, usage.Errors)
+	if usage.FirstCall != "" {
+		fmt.Printf("  range: %s to %s\n", usage.FirstCall, usage.LastCall)
+	}
+	for _, t := range usage.ByTool {
+		fmt.Printf("  %-16s %6d calls  %4d errors  %5d ms avg  last %s\n",
+			t.Tool, t.Calls, t.Errors, t.AvgDurationMs, t.LastUsed)
+	}
+	if len(usage.TopQueries) > 0 {
+		fmt.Println("\n  top queries")
+		for _, q := range usage.TopQueries {
+			fmt.Printf("    %6d  %s\n", q.Calls, q.Query)
 		}
 	}
 

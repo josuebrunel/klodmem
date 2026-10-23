@@ -23,6 +23,7 @@ Claude forgot what you two solved last week? klodmem gives Claude Code full-text
   - [`search_history`](#search_history)
   - [`search_prompts`](#search_prompts)
   - [`search_plans`](#search_plans)
+  - [`usage_stats`](#usage_stats)
 - [Contributing](#contributing)
 
 ## Quick start
@@ -63,7 +64,7 @@ That's it. No server, no API key, no config. To check the connection, run `claud
 
 ### Other agents
 
-Any MCP-capable agent can use klodmem. Add it as a stdio server with the command `klodmem`, and it gets the same four tools.
+Any MCP-capable agent can use klodmem. Add it as a stdio server with the command `klodmem`, and it gets the same tools.
 
 **Hermes**
 
@@ -99,6 +100,7 @@ Why it's useful:
 - **Cross-project.** One index covers every project under `~/.claude/projects`, so what you solved in one repo is findable from any other.
 - **Cross-agent.** It's a standard MCP server. Once an agent has added it, that agent can read Claude's memory, conversation history, prompts, and plans through the tools below.
 - **Live.** File watchers keep new memories, conversation turns, prompts, and plans searchable while a session is open.
+- **Knows how it's used.** Every tool call is logged locally; `usage_stats` and `klodmem -stat` show calls per tool, errors, latency, and top queries.
 - **Local and private.** No network calls. klodmem only reads your files.
 - **Safe to try.** Your markdown stays the source of truth and the index is disposable. `klodmem -reset` rebuilds it any time.
 
@@ -147,7 +149,8 @@ Then point MCP at the binary: `claude mcp add --scope user klodmem -- /path/to/k
 
 - On startup klodmem scans `~/.claude/projects/*/memory/*.md` (skipping each `MEMORY.md` index), every `~/.claude/projects/*/<session-id>.jsonl` transcript, the global prompt history at `~/.claude/history.jsonl`, and every `~/.claude/plans/*.md`, then indexes them into SQLite FTS5.
 - Transcripts and the prompt history are read incrementally: only newly appended lines on each scan. All four sources keep being watched while the MCP session is open.
-- The index lives at `~/.claude/klodmem/klodmem.db` and is disposable. klodmem rebuilds it from your files.
+- Each MCP tool call is appended to a local `tool_calls` table (tool, query, project, result count, error flag, duration). `usage_stats` and `-stat` aggregate it.
+- The index lives at `~/.claude/klodmem/klodmem.db` and is disposable. klodmem rebuilds it from your files. Usage data is not rebuildable, so resets keep it.
 
 ## CLI reference
 
@@ -166,7 +169,7 @@ Running `klodmem` with no flags starts the MCP server, which is the normal way t
 | `klodmem -reset.history`  | Truncate the history index and re-index it, then exit          |
 | `klodmem -reset.prompts`  | Truncate the prompt history index and re-index it, then exit   |
 | `klodmem -reset.plans`    | Truncate the plan index and re-index it, then exit             |
-| `klodmem -stat`           | Print index statistics and exit, no scanning                   |
+| `klodmem -stat`           | Print index and MCP usage statistics and exit, no scanning     |
 | `klodmem -version`        | Print the klodmem version and exit                             |
 
 **`-ingest`** is handy for warming the index right after installing, or running from cron independent of any Claude Code session.
@@ -175,9 +178,10 @@ Running `klodmem` with no flags starts the MCP server, which is the normal way t
 
 - It clears rows instead of deleting the database file, so it's safe while other klodmem processes have the database open. They re-read from the start on their next scan.
 - `-reset` equals `-reset.memory -reset.history -reset.prompts -reset.plans`, and all imply the matching `-ingest` flags.
+- Resets leave MCP usage data (`tool_calls`) intact, since it cannot be rebuilt from files.
 - Deleting the file by hand also works, but only while no MCP client is using it.
 
-**`-stat`** prints what's currently indexed. Combine it with another flag to act then report, e.g. `klodmem -reset -stat` or `klodmem -ingest -stat`.
+**`-stat`** prints what's currently indexed plus how the MCP tools have been used. Combine it with another flag to act then report, e.g. `klodmem -reset -stat` or `klodmem -ingest -stat`.
 
 <details>
 <summary>Example <code>-stat</code> output</summary>
@@ -207,6 +211,18 @@ by project
   -home-user-workspace-project-alpha     2436 messages    24 sessions
   -home-user-workspace-project-beta       894 messages    13 sessions
   ...
+
+mcp calls
+  calls: 42 (errors: 3)
+  range: 2026-09-01T09:12:00Z to 2026-09-03T11:18:58Z
+  search_history       20 calls     2 errors     12 ms avg  last 2026-09-03T11:18:58Z
+  search_memory        12 calls     0 errors      8 ms avg  last 2026-09-03T10:02:11Z
+  usage_stats           6 calls     0 errors      1 ms avg  last 2026-09-03T11:18:58Z
+  search_prompts        4 calls     1 error       9 ms avg  last 2026-09-02T16:40:00Z
+
+  top queries
+        5  connection refused
+        3  docker-compose ports
 ```
 
 </details>
@@ -231,7 +247,7 @@ claude mcp add --scope user klodmem -e KLODMEM_LOG_LEVEL=debug -- klodmem
 
 ## MCP tools
 
-klodmem exposes four search tools, one per source. All are full-text, local, and cross-project (plans are global, so they have no project filter).
+klodmem exposes four search tools, one per source, plus `usage_stats`. All are local; the searches are full-text and cross-project (plans are global, so they have no project filter).
 
 ### `search_memory`
 
@@ -287,6 +303,22 @@ Full-text search over Claude Code's Plan Mode plans (`~/.claude/plans/*.md`). Pl
 | `limit` | int    | no       | Max results (default 10) |
 
 Each result includes the plan's title, description, a snippet, and the file path.
+
+### `usage_stats`
+
+Aggregate statistics for klodmem's own MCP usage, recorded locally on every call.
+
+| Field   | Type | Required | Description                              |
+|---------|------|----------|------------------------------------------|
+| `limit` | int  | no       | Max top queries to return (default 10)   |
+
+Returns total calls, errors, the time range, per-tool calls/errors/average latency/last use, and the most frequent queries.
+
+Good to know:
+
+- **Every call is recorded.** That includes validation failures (`query must not be empty`) and `usage_stats` itself, so the numbers reflect real traffic.
+- **Local only.** Query text is stored in the local `tool_calls` table to power "top queries"; it never leaves your machine.
+- **Survives resets.** Usage is not rebuildable from files, so `-reset` keeps it.
 
 ## Contributing
 

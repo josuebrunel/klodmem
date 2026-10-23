@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/josuebrunel/klodmem/internal/memoryfile"
 	"github.com/josuebrunel/klodmem/internal/planfile"
@@ -911,5 +912,97 @@ func TestResetPromptsClearsOnlyPromptIndex(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("SearchPrompts() after reset and re-index = %d results, want 1", len(results))
+	}
+}
+
+func TestRecordToolCallAndStats(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	calls := []ToolCall{
+		{Timestamp: base, Tool: "search_memory", Query: "postgres", Project: "p", ResultCount: 2, Duration: 10 * time.Millisecond},
+		{Timestamp: base.Add(time.Minute), Tool: "search_memory", Query: "postgres", Project: "p", ResultCount: 0, Duration: 30 * time.Millisecond},
+		{Timestamp: base.Add(2 * time.Minute), Tool: "search_history", Query: "build", ResultCount: 1, IsError: true, Duration: 20 * time.Millisecond},
+	}
+	for _, c := range calls {
+		if err := s.RecordToolCall(ctx, c); err != nil {
+			t.Fatalf("RecordToolCall(%s) error: %v", c.Tool, err)
+		}
+	}
+
+	stats, err := s.ToolCallStats(ctx, 0)
+	if err != nil {
+		t.Fatalf("ToolCallStats() error: %v", err)
+	}
+	if stats.TotalCalls != 3 || stats.Errors != 1 {
+		t.Fatalf("ToolCallStats() total/errors = (%d, %d), want (3, 1)", stats.TotalCalls, stats.Errors)
+	}
+	if len(stats.ByTool) != 2 {
+		t.Fatalf("ToolCallStats().ByTool = %+v, want 2 tools", stats.ByTool)
+	}
+	if got := stats.ByTool[0]; got.Tool != "search_memory" || got.Calls != 2 || got.Errors != 0 || got.AvgDurationMs != 20 {
+		t.Fatalf("ByTool[0] = %+v, want search_memory with 2 calls, 0 errors, 20ms avg", got)
+	}
+	if got := stats.ByTool[1]; got.Tool != "search_history" || got.Calls != 1 || got.Errors != 1 || got.AvgDurationMs != 20 {
+		t.Fatalf("ByTool[1] = %+v, want search_history with 1 call, 1 error, 20ms avg", got)
+	}
+	if got := stats.ByTool[0].LastUsed; got != "2026-08-01T12:01:00Z" {
+		t.Fatalf("ByTool[0].LastUsed = %q, want 2026-08-01T12:01:00Z", got)
+	}
+	if len(stats.TopQueries) != 2 || stats.TopQueries[0].Query != "postgres" || stats.TopQueries[0].Calls != 2 {
+		t.Fatalf("TopQueries = %+v, want postgres first with 2 calls", stats.TopQueries)
+	}
+	if stats.FirstCall != "2026-08-01T12:00:00Z" || stats.LastCall != "2026-08-01T12:02:00Z" {
+		t.Fatalf("range = (%q, %q), want (2026-08-01T12:00:00Z, 2026-08-01T12:02:00Z)", stats.FirstCall, stats.LastCall)
+	}
+
+	// limit bounds the top-queries list.
+	limited, err := s.ToolCallStats(ctx, 1)
+	if err != nil {
+		t.Fatalf("ToolCallStats(limit=1) error: %v", err)
+	}
+	if len(limited.TopQueries) != 1 {
+		t.Fatalf("ToolCallStats(limit=1).TopQueries = %+v, want 1", limited.TopQueries)
+	}
+}
+
+func TestToolCallStatsEmpty(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	stats, err := s.ToolCallStats(ctx, 0)
+	if err != nil {
+		t.Fatalf("ToolCallStats() error: %v", err)
+	}
+	if stats.TotalCalls != 0 || stats.Errors != 0 || len(stats.ByTool) != 0 || len(stats.TopQueries) != 0 {
+		t.Fatalf("ToolCallStats() on empty store = %+v, want all empty", stats)
+	}
+	if stats.FirstCall != "" || stats.LastCall != "" {
+		t.Fatalf("ToolCallStats() range on empty store = (%q, %q), want empty", stats.FirstCall, stats.LastCall)
+	}
+}
+
+// TestResetPreservesToolCalls documents that usage data is not part of the
+// file-derived index: resets must not wipe it.
+func TestResetPreservesToolCalls(t *testing.T) {
+	s, ctx := openTestStore(t)
+
+	if err := s.RecordToolCall(ctx, ToolCall{Timestamp: time.Now(), Tool: "search_memory", Query: "x"}); err != nil {
+		t.Fatalf("RecordToolCall() error: %v", err)
+	}
+	for name, reset := range map[string]func(context.Context) ([]ResetReport, error){
+		"memory": s.ResetMemory, "history": s.ResetHistory,
+		"prompts": s.ResetPrompts, "plans": s.ResetPlans,
+	} {
+		if _, err := reset(ctx); err != nil {
+			t.Fatalf("Reset(%s) error: %v", name, err)
+		}
+	}
+
+	stats, err := s.ToolCallStats(ctx, 0)
+	if err != nil {
+		t.Fatalf("ToolCallStats() error: %v", err)
+	}
+	if stats.TotalCalls != 1 {
+		t.Fatalf("ToolCallStats().TotalCalls = %d after resets, want 1 (usage must survive)", stats.TotalCalls)
 	}
 }

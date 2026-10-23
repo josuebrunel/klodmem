@@ -241,7 +241,7 @@ func TestNew(t *testing.T) {
 	for _, tool := range toolList.Tools {
 		names[tool.Name] = true
 	}
-	for _, want := range []string{"search_memory", "search_history", "search_prompts", "search_plans"} {
+	for _, want := range []string{"search_memory", "search_history", "search_prompts", "search_plans", "usage_stats"} {
 		if !names[want] {
 			t.Fatalf("ListTools() = %v, want %s registered", names, want)
 		}
@@ -449,6 +449,90 @@ func TestFormatPlanResults(t *testing.T) {
 	for _, want := range []string{"Plan: a", "desc", "snip", "/plans/a.md"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatPlanResults(one) = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+func TestHandlerRecordsUsage(t *testing.T) {
+	s, ctx := openTestStore(t)
+	log := testLogger()
+
+	if _, _, err := handleSearchMemory(ctx, s, log, SearchInput{Query: "durability"}); err != nil {
+		t.Fatalf("handleSearchMemory() error: %v", err)
+	}
+	// A validation failure is recorded as an error call too.
+	if _, _, err := handleSearchMemory(ctx, s, log, SearchInput{Query: "  "}); err != nil {
+		t.Fatalf("handleSearchMemory(empty) error: %v", err)
+	}
+
+	stats, err := s.ToolCallStats(ctx, 0)
+	if err != nil {
+		t.Fatalf("ToolCallStats() error: %v", err)
+	}
+	if stats.TotalCalls != 2 || stats.Errors != 1 {
+		t.Fatalf("ToolCallStats() total/errors = (%d, %d), want (2, 1)", stats.TotalCalls, stats.Errors)
+	}
+	if len(stats.ByTool) != 1 || stats.ByTool[0].Tool != "search_memory" || stats.ByTool[0].Calls != 2 {
+		t.Fatalf("ToolCallStats().ByTool = %+v, want search_memory with 2 calls", stats.ByTool)
+	}
+}
+
+func TestHandleUsageStats(t *testing.T) {
+	s, ctx := openTestStore(t)
+	log := testLogger()
+
+	// Empty store: nothing recorded yet.
+	res, _, err := handleUsageStats(ctx, s, log, UsageStatsInput{})
+	if err != nil {
+		t.Fatalf("handleUsageStats() error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleUsageStats() IsError = true, want false")
+	}
+	if text := contentText(res); !strings.Contains(text, "no tool calls recorded yet") {
+		t.Fatalf("handleUsageStats() text = %q, want the empty message", text)
+	}
+
+	// Produce a call, then read the aggregates. The first usage_stats call was
+	// itself recorded, so two tools should appear.
+	if _, _, err := handleSearchHistory(ctx, s, log, HistorySearchInput{Query: "build"}); err != nil {
+		t.Fatalf("handleSearchHistory() error: %v", err)
+	}
+
+	res, _, err = handleUsageStats(ctx, s, log, UsageStatsInput{})
+	if err != nil {
+		t.Fatalf("handleUsageStats() (second call) error: %v", err)
+	}
+	text := contentText(res)
+	for _, want := range []string{"tool calls:", "search_history", "usage_stats"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("handleUsageStats() text = %q, want it to contain %q", text, want)
+		}
+	}
+}
+
+func TestFormatUsageStats(t *testing.T) {
+	if got := formatUsageStats(store.ToolCallStats{}); got != "tool calls: 0 (errors: 0)" {
+		t.Fatalf("formatUsageStats(empty) = %q", got)
+	}
+
+	got := formatUsageStats(store.ToolCallStats{
+		TotalCalls: 3,
+		Errors:     1,
+		FirstCall:  "2026-08-01T12:00:00Z",
+		LastCall:   "2026-08-01T12:02:00Z",
+		ByTool: []store.ToolStat{
+			{Tool: "search_memory", Calls: 2, Errors: 0, AvgDurationMs: 20, LastUsed: "2026-08-01T12:01:00Z"},
+			{Tool: "search_history", Calls: 1, Errors: 1, AvgDurationMs: 20, LastUsed: "2026-08-01T12:02:00Z"},
+		},
+		TopQueries: []store.QueryStat{{Query: "postgres", Calls: 2}},
+	})
+	for _, want := range []string{
+		"tool calls: 3 (errors: 1)", "range: 2026-08-01T12:00:00Z to 2026-08-01T12:02:00Z",
+		"search_memory", "search_history", "top queries", "postgres",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatUsageStats() = %q, want it to contain %q", got, want)
 		}
 	}
 }
